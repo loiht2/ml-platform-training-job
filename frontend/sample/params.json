@@ -1,0 +1,80 @@
+{
+  "jobName": "train-20251111052644-oj2y",
+  "priority": 500,
+  "algorithm": {
+    "source": "builtin",
+    "algorithmName": "xgboost"
+  },
+  "resources": {
+    "instanceResources": {
+      "cpuCores": 4,
+      "memoryGiB": 16,
+      "gpuCount": 0
+    },
+    "instanceCount": 1,
+    "volumeSizeGB": 50
+  },
+  "stoppingCondition": {
+    "maxRuntimeSeconds": 14400
+  },
+  "inputDataConfig": [
+    {
+      "id": "channel-p42otsi1",
+      "channelName": "train",
+      "sourceType": "object-storage",
+      "storageProvider": "minio",
+      "endpoint": "https://minio.local",
+      "bucket": "storage://input",
+      "prefix": "datasets/default/"
+    }
+  ],
+  "outputDataConfig": {
+    "artifactUri": "storage://output/artifacts/"
+  },
+  "hyperparameters": {
+    "xgboost": {
+      "early_stopping_rounds": null,
+      "csv_weights": 0,
+      "num_round": 300,
+      "booster": "gbtree",
+      "verbosity": 1,
+      "nthread": "auto",
+      "eta": 0.3,
+      "gamma": 0,
+      "max_depth": 6,
+      "min_child_weight": 1,
+      "max_delta_step": 0,
+      "subsample": 1,
+      "sampling_method": "uniform",
+      "colsample_bytree": 1,
+      "colsample_bylevel": 1,
+      "colsample_bynode": 1,
+      "lambda": 1,
+      "alpha": 0,
+      "tree_method": "auto",
+      "sketch_eps": 0.03,
+      "scale_pos_weight": 1,
+      "updater": "auto",
+      "dsplit": "row",
+      "refresh_leaf": 1,
+      "process_type": "default",
+      "grow_policy": "depthwise",
+      "max_leaves": 0,
+      "max_bin": 256,
+      "num_parallel_tree": 1,
+      "sample_type": "uniform",
+      "normalize_type": "tree",
+      "rate_drop": 0,
+      "one_drop": 0,
+      "skip_drop": 0,
+      "lambda_bias": 0,
+      "tweedie_variance_power": 1.5,
+      "objective": "reg:squarederror",
+      "base_score": 0.5,
+      "eval_metric": [
+        "rmse"
+      ]
+    }
+  },
+  "customHyperparameters": {}
+}

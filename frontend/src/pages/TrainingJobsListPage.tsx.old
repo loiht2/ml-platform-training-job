@@ -1,0 +1,143 @@
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { loadJobs } from "@/lib/jobs-storage";
+import type { JobStatus, StoredJob } from "@/types/training-job";
+
+const JOB_STATUSES = new Set<JobStatus>(["Pending", "Running", "Succeeded", "Failed"]);
+
+function formatTimestamp(ts: number) {
+  return new Date(ts).toLocaleString();
+}
+
+function CreateButton() {
+  const [searchParams] = useSearchParams();
+  const qs = searchParams.toString();
+  const href = qs ? `/create?${qs}` : "/create";
+  return (
+    <Button asChild size="lg">
+      <Link to={href}>Create Training Job</Link>
+    </Button>
+  );
+}
+
+export default function TrainingJobsListPage() {
+  const [jobs, setJobs] = useState<StoredJob[]>([]);
+
+  useEffect(() => {
+    let ignore = false;
+    let timer: number | undefined;
+
+    async function load() {
+      try {
+        const data = await loadJobs();
+        if (!ignore) {
+          const parsed = data.filter((item): item is StoredJob => {
+            if (!item || typeof item !== "object") return false;
+            const maybe = item as Partial<StoredJob>;
+            return (
+              typeof maybe.id === "string" &&
+              typeof maybe.algorithm === "string" &&
+              typeof maybe.createdAt === "number" &&
+              typeof maybe.priority === "number" &&
+              typeof maybe.status === "string" &&
+              JOB_STATUSES.has(maybe.status as JobStatus)
+            );
+          });
+          setJobs(parsed);
+        }
+      } catch (error) {
+        console.error("Failed to load jobs", error);
+        if (!ignore) setJobs([]);
+      }
+    }
+
+    load();
+    timer = window.setInterval(load, 5000);
+
+    return () => {
+      ignore = true;
+      if (timer) window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!jobs.length) return;
+    const interval = window.setInterval(() => {
+      setJobs((prev) =>
+        prev.map((job) => {
+          if (job.status === "Pending" && job.pendingUntil && Date.now() >= job.pendingUntil) {
+            return { ...job, status: "Running" as JobStatus, pendingUntil: undefined };
+          }
+          return job;
+        })
+      );
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [jobs.length]);
+
+  const sortedJobs = useMemo(() => [...jobs].sort((a, b) => b.createdAt - a.createdAt), [jobs]);
+
+  return (
+    <main className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
+      <div className="mx-auto max-w-6xl space-y-6 p-6 md:p-10">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h1 className="text-3xl font-semibold tracking-tight">Training Jobs</h1>
+            <p className="text-slate-600">Monitor the status of submitted jobs or create a new one.</p>
+          </div>
+          <CreateButton />
+        </div>
+
+        {sortedJobs.length === 0 ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">No jobs yet</CardTitle>
+              <CardDescription>Click “Create Training Job” to submit your first training job.</CardDescription>
+            </CardHeader>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {sortedJobs.map((job) => (
+              <Card key={job.id}>
+                <CardHeader>
+                  <CardTitle className="text-lg font-semibold">{job.id}</CardTitle>
+                  <CardDescription>Algorithm: {job.algorithm}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3 text-sm text-slate-600">
+                  <div className="flex items-center justify-between">
+                    <span>Status</span>
+                    <Badge
+                      variant={
+                        job.status === "Succeeded"
+                          ? "secondary"
+                          : job.status === "Running"
+                          ? "default"
+                          : job.status === "Pending"
+                          ? "outline"
+                          : "destructive"
+                      }
+                    >
+                      {job.status}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Created</span>
+                    <span className="font-medium text-slate-700">{formatTimestamp(job.createdAt)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span>Priority</span>
+                    <span className="font-medium text-slate-700">{job.priority}</span>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+    </main>
+  );
+}

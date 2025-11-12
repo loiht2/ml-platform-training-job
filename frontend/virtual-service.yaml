@@ -1,0 +1,58 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: kf-training-job-ui
+  namespace: kubeflow
+spec:
+  gateways:
+    - kubeflow/kubeflow-gateway
+  hosts:
+    - '*'
+  http:
+    # Direct root (with or without trailing slash)
+    - match:
+        - uri:
+            exact: /training-job
+        - uri:
+            exact: /training-job/
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: training-job-ui.default.svc.cluster.local
+            port:
+              number: 80
+
+    - match:
+        - uri:
+            prefix: /training-job/create
+      rewrite:
+        uri: /create
+      route:
+        - destination:
+            host: training-job-ui.default.svc.cluster.local
+            port:
+              number: 80
+
+    - match:
+        - uri:
+            prefix: /training-job/assets/
+      rewrite:
+        uri: /assets/
+      route:
+        - destination:
+            host: training-job-ui.default.svc.cluster.local
+            port:
+              number: 80
+
+    # Direct base path with additional segments
+    - match:
+        - uri:
+            prefix: /create
+        - uri:
+            prefix: /assets/
+      route:
+        - destination:
+            host: training-job-ui.default.svc.cluster.local
+            port:
+              number: 80

@@ -1,0 +1,333 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: training-job
+#  namespace: kubeflow-user-example-com
+spec:
+  entrypoint: >-
+    python /home/ray/samples/xgboost_code.py
+  runtimeEnvYAML: |
+    env_vars:
+      # ==== TRAINING CONTROL ====
+      NUM_WORKER: "2"
+      USE_GPU: "true"
+      LABEL_COLUMN: "target"
+      RUN_NAME: "xgb-train"
+      STORAGE_PATH: "/home/ray/result-storage"
+      
+      NUM_BOOST_ROUND: "10"
+      EARLY_STOPPING_ROUNDS: ""
+
+      CSV_WEIGHT: "0"
+
+      # flattened XGBoost Params
+      BOOSTER: "gbtree"
+      VERBOSITY: "1"
+
+      ETA: "0.01"
+      GAMMA: "0"
+      MAX_DEPTH: "6"
+      MIN_CHILD_WEIGHT: "1"
+      MAX_DELTA_STEP: "0"
+      SUBSAMPLE: "1"
+      SAMPLING_METHOD: "uniform"
+      COLSAMPLE_BYTREE: "1"
+      COLSAMPLE_BYLEVEL: "1"
+      COLSAMPLE_BYNODE: "1"
+      LAMBDA: "1"
+      ALPHA: "0"
+      TREE_METHOD: "gpu_hist"
+      SKETCH_EPS: "0.03"
+      SCALE_POS_WEIGHT: "1"
+      # UPDATER: "auto"
+      DSPLIT: "row"
+      REFRESH_LEAF: "1"
+      PROCESS_TYPE: "default"
+      GROW_POLICY: "depthwise"
+      MAX_LEAVES: "0"
+      MAX_BIN: "256"
+      NUM_PARALLEL_TREE: "1"
+      SAMPLE_TYPE: "uniform"
+      NORMALIZE_TYPE: "tree"
+      RATE_DROP: "0"
+      ONE_DROP: "0"
+      SKIP_DROP: "0"
+      LAMBDA_BIAS: "0"
+      TWEEDIE_VARIANCE_POWER: "1.5"
+      OBJECTIVE: "reg:squarederror"
+      BASE_SCORE: "0.5"
+      EVAL_METRIC: "rmse"
+
+      # Minio settings
+      S3_ENDPOINT: "http://minio.minio-system.svc.cluster.local:9000"
+      S3_ACCESS_KEY: "loiht2"
+      S3_SECRET_KEY: "E4XWyvYtlS6E9Q92DPq7sJBoJhaa1j7pbLHhgfeZ"
+      S3_REGION: "us-east-1"
+      S3_BUCKET: "kham-datasets"
+      S3_TRAIN_KEY: "iris/iris_train.csv"
+      S3_VAL_KEY: "iris/iris_val.csv"
+  rayClusterSpec:
+    rayVersion: '2.46.0'
+    headGroupSpec:
+      rayStartParams: {}
+      #pod template
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+        spec:
+          containers:
+          - name: ray-head
+            image: kiepdoden123/iris-training-ray:v1.0
+            ports:
+            - containerPort: 6379
+              name: gcs-server
+            - containerPort: 8265 # Ray dashboard
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            resources:
+              limits:
+                cpu: "2"
+              requests:
+                cpu: "2"
+            volumeMounts:
+            - mountPath: /home/ray/samples
+              name: code-sample
+            - mountPath: /home/ray/result-storage
+              name: result-storage
+          volumes:
+          # You set volumes at the Pod level, then mount them into containers inside that Pod
+          - name: code-sample
+            configMap:
+              # Provide the name of the ConfigMap you want to mount.
+              name: ray-job-code-sample
+              # An array of keys from the ConfigMap to create as files
+              items:
+              - key: xgboost_code.py
+                path: xgboost_code.py
+          - name: result-storage
+            persistentVolumeClaim:
+              claimName: kham-pv-for-xgboost
+    workerGroupSpecs:
+    # the pod replicas in this group typed worker
+    - replicas: 1
+      minReplicas: 1
+      maxReplicas: 5
+      # logical group name, for this called small-group, also can be functional
+      groupName: small-group
+      rayStartParams: {}
+      #pod template
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+        spec:
+          containers:
+          - name: ray-worker # must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc'
+            image: kiepdoden123/iris-training-ray:v1.0
+            resources:
+              limits:
+                cpu: "2"
+                nvidia.com/gpu: "2"
+              requests:
+                cpu: "2"
+                nvidia.com/gpu: "2"
+            volumeMounts:
+              - mountPath: /home/ray/result-storage
+                name: result-storage
+          volumes:
+          - name: result-storage
+            persistentVolumeClaim:
+              claimName: kham-pv-for-xgboost
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ray-job-code-sample
+#  namespace: kubeflow-user-example-com
+data:
+  xgboost_code.py: |
+    import os
+    import json
+    import pandas as pd
+    import io
+    import boto3
+    import ray
+    from ray.train import ScalingConfig, RunConfig
+    from ray.train.xgboost import XGBoostTrainer
+
+    def str2bool(v, default=False):
+        if v is None:
+            return default
+        return str(v).strip().lower() in ("1", "true", "t", "yes", "y")
+
+    def getenv(name, default=None, required=False):
+        v = os.environ.get(name, default)
+        if required and v is None:
+            raise ValueError(f"Missing required environment variable: {name}")
+        return v
+
+    def getenv_int(name, default=None, required=False):
+        v = getenv(name, None, required)
+        if v is None:
+            return default
+        try:
+            return int(str(v).strip())
+        except Exception:
+            raise ValueError(f"Environment variable {name} must be an integer, got: {v}")
+
+    def getenv_float(name, default=None, required=False):
+        v = getenv(name, None, required)
+        if v is None:
+            return default
+        try:
+            return float(str(v).strip())
+        except Exception:
+            raise ValueError(f"Environment variable {name} must be a float, got: {v}")
+
+    def build_xgb_params():
+        """
+        Collect flattened XGBoost params from env. Add to this map as needed.
+        """
+        to_str   = lambda k: getenv(k, None)
+        to_int   = lambda k: getenv_int(k, None)
+        to_float = lambda k: getenv_float(k, None)
+
+        specs = {
+          # name -> (xgb key, caster)
+          "BOOSTER":               ("booster", to_str),
+          "VERBOSITY":             ("verbosity", to_int),
+          "NTHREAD":               ("nthread", to_int),
+
+          "ETA":                   ("eta", to_float),
+          "GAMMA":                 ("gamma", to_float),
+          "MAX_DEPTH":             ("max_depth", to_int),
+          "MIN_CHILD_WEIGHT":      ("min_child_weight", to_float),
+          "MAX_DELTA_STEP":        ("max_delta_step", to_float),
+          "SUBSAMPLE":             ("subsample", to_float),
+          "SAMPLING_METHOD":       ("sampling_method", to_str),
+          "COLSAMPLE_BYTREE":      ("colsample_bytree", to_float),
+          "COLSAMPLE_BYLEVEL":     ("colsample_bylevel", to_float),
+          "COLSAMPLE_BYNODE":      ("colsample_bynode", to_float),
+          "LAMBDA":                ("lambda", to_float),
+          "ALPHA":                 ("alpha", to_float),
+          "TREE_METHOD":           ("tree_method", to_str),
+          "SKETCH_EPS":            ("sketch_eps", to_float),
+          "SCALE_POS_WEIGHT":      ("scale_pos_weight", to_float),
+          "UPDATER":               ("updater", to_str),
+          "DSPLIT":                ("dsplit", to_str),
+          "REFRESH_LEAF":          ("refresh_leaf", to_int),
+          "PROCESS_TYPE":          ("process_type", to_str),
+          "GROW_POLICY":           ("grow_policy", to_str),
+          "MAX_LEAVES":            ("max_leaves", to_int),
+          "MAX_BIN":               ("max_bin", to_int),
+          "NUM_PARALLEL_TREE":     ("num_parallel_tree", to_int),
+          "SAMPLE_TYPE":           ("sample_type", to_str),
+          "NORMALIZE_TYPE":        ("normalize_type", to_str),
+          "RATE_DROP":             ("rate_drop", to_float),
+          "ONE_DROP":              ("one_drop", to_int),
+          "SKIP_DROP":             ("skip_drop", to_float),
+          "LAMBDA_BIAS":           ("lambda_bias", to_float),
+          "TWEEDIE_VARIANCE_POWER":("tweedie_variance_power", to_float),
+          "OBJECTIVE":             ("objective", to_str),
+          "BASE_SCORE":            ("base_score", to_float),
+          "EVAL_METRIC":           ("eval_metric", to_str),
+        }
+        params = {}
+        for env_key, (xgb_key, caster) in specs.items():
+            val = caster(env_key)
+            if val is not None and val != "":
+                # Optional: split comma-separated eval_metric -> list
+                if xgb_key == "eval_metric" and ("," in str(val)):
+                    params[xgb_key] = [m.strip() for m in str(val).split(",") if m.strip()]
+                else:
+                    params[xgb_key] = val
+        return params
+
+    def main():
+        # -------- Required/optional inputs (all via env) --------
+        train_csv     = getenv("TRAIN_CSV", required=False)   # you currently read from S3; keep optional
+        val_csv       = getenv("VAL_CSV", required=False)
+        label_col     = getenv("LABEL_COLUMN", default="target")
+        num_round     = getenv_int("NUM_BOOST_ROUND", required=True)
+        use_gpu       = str2bool(getenv("USE_GPU", "false"))
+        num_workers   = max(1, getenv_int("NUM_WORKER", default=1))
+        run_name      = getenv("RUN_NAME", default="xgb-train")
+        storage_path  = getenv("STORAGE_PATH", default=None)
+
+        # Build XGBoost params from flattened env vars
+        params = build_xgb_params()
+
+        # If using GPU and the user didn't set these explicitly, choose good defaults
+        if use_gpu:
+            params.setdefault("tree_method", "gpu_hist")
+            params.setdefault("predictor", "gpu_predictor")
+
+        print("pre init")
+        # Connect/start Ray
+        # (If RAY_ADDRESS is set by operator, ray.init() will attach; otherwise starts local in the pod.)
+        ray.init()
+        print("post init")
+
+        # ---- Your current MinIO/S3 data loading ----
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=getenv("S3_ENDPOINT"),
+            aws_access_key_id=getenv("S3_ACCESS_KEY"),
+            aws_secret_access_key=getenv("S3_SECRET_KEY"),
+            region_name=getenv("S3_REGION"),
+            config=boto3.session.Config(signature_version="s3v4"),
+        )
+
+        train_obj_key = getenv("S3_TRAIN_KEY")
+        val_obj_key   = getenv("S3_VAL_KEY")
+        bucket        = getenv("S3_BUCKET")
+
+        train_response = s3.get_object(Bucket=bucket, Key=train_obj_key)
+        val_response   = s3.get_object(Bucket=bucket, Key=val_obj_key)
+
+        train_df = pd.read_csv(io.BytesIO(train_response["Body"].read()))
+        val_df   = pd.read_csv(io.BytesIO(val_response["Body"].read()))
+
+        # Ensure integer labels if possible
+        if train_df[label_col].dtype != "int64":
+            try:
+                train_df[label_col] = train_df[label_col].astype(int)
+            except Exception:
+                pass
+        if val_df[label_col].dtype != "int64":
+            try:
+                val_df[label_col] = val_df[label_col].astype(int)
+            except Exception:
+                pass
+
+        train_ds = ray.data.from_pandas(train_df).materialize()
+        val_ds   = ray.data.from_pandas(val_df).materialize()
+
+        trainer = XGBoostTrainer(
+            label_column=label_col,
+            params=params,
+            num_boost_round=int(num_round),
+            datasets={"train": train_ds, "eval": val_ds},
+            scaling_config=ScalingConfig(
+                num_workers=int(num_workers),
+                use_gpu=use_gpu,
+            ),
+            run_config=RunConfig(
+                name=run_name,
+                storage_path=storage_path,
+            ),
+        )
+
+        result = trainer.fit()
+        print("Done")
+
+        try:
+            print("Metrics keys:", list(result.metrics.keys())[:20])
+            print("Checkpoint:", result.checkpoint)
+        except Exception:
+            pass
+
+    if __name__ == "__main__":
+        main()
