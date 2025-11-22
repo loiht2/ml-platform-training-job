@@ -1,0 +1,132 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: training-job
+#  namespace: kubeflow-user-example-com
+spec:
+  entrypoint: >-
+    python /home/ray/xgboost_train.py
+  runtimeEnvYAML: |
+    env_vars:
+      # ==== TRAINING CONTROL ====
+      NUM_WORKER: "2"
+      USE_GPU: "true"
+      LABEL_COLUMN: "target"
+      RUN_NAME: "xgb-train"
+      STORAGE_PATH: "/home/ray/result-storage"
+      
+      NUM_BOOST_ROUND: "10"
+      EARLY_STOPPING_ROUNDS: ""
+
+      CSV_WEIGHT: "0"
+
+      # flattened XGBoost Params
+      BOOSTER: "gbtree"
+      VERBOSITY: "1"
+
+      ETA: "0.01"
+      GAMMA: "0"
+      MAX_DEPTH: "6"
+      MIN_CHILD_WEIGHT: "1"
+      MAX_DELTA_STEP: "0"
+      SUBSAMPLE: "1"
+      SAMPLING_METHOD: "uniform"
+      COLSAMPLE_BYTREE: "1"
+      COLSAMPLE_BYLEVEL: "1"
+      COLSAMPLE_BYNODE: "1"
+      LAMBDA: "1"
+      ALPHA: "0"
+      TREE_METHOD: "gpu_hist"
+      SKETCH_EPS: "0.03"
+      SCALE_POS_WEIGHT: "1"
+      # UPDATER: "auto"
+      DSPLIT: "row"
+      REFRESH_LEAF: "1"
+      PROCESS_TYPE: "default"
+      GROW_POLICY: "depthwise"
+      MAX_LEAVES: "0"
+      MAX_BIN: "256"
+      NUM_PARALLEL_TREE: "1"
+      SAMPLE_TYPE: "uniform"
+      NORMALIZE_TYPE: "tree"
+      RATE_DROP: "0"
+      ONE_DROP: "0"
+      SKIP_DROP: "0"
+      LAMBDA_BIAS: "0"
+      TWEEDIE_VARIANCE_POWER: "1.5"
+      OBJECTIVE: "reg:squarederror"
+      BASE_SCORE: "0.5"
+      EVAL_METRIC: "rmse"
+
+      # Minio settings
+      S3_ENDPOINT: "http://minio.minio-system.svc.cluster.local:9000"
+      S3_ACCESS_KEY: "loiht2"
+      S3_SECRET_KEY: "E4XWyvYtlS6E9Q92DPq7sJBoJhaa1j7pbLHhgfeZ"
+      S3_REGION: "us-east-1"
+      S3_BUCKET: "kham-datasets"
+      S3_TRAIN_KEY: "iris/iris_train.csv"
+      S3_VAL_KEY: "iris/iris_val.csv"
+  rayClusterSpec:
+    rayVersion: '2.46.0'
+    headGroupSpec:
+      rayStartParams: {}
+      #pod template
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+        spec:
+          containers:
+          - name: ray-head
+            image: kiepdoden123/iris-training-ray:v1.2
+            ports:
+            - containerPort: 6379
+              name: gcs-server
+            - containerPort: 8265 # Ray dashboard
+              name: dashboard
+            - containerPort: 10001
+              name: client
+            resources:
+              limits:
+                cpu: "2"
+              requests:
+                cpu: "2"
+            volumeMounts:
+            - mountPath: /home/ray/result-storage
+              name: result-storage
+          volumes:
+          # You set volumes at the Pod level, then mount them into containers inside that Pod
+          - name: result-storage
+            persistentVolumeClaim:
+              claimName: kham-pv-for-xgboost
+    workerGroupSpecs:
+    # the pod replicas in this group typed worker
+    - replicas: 1
+      minReplicas: 1
+      maxReplicas: 5
+      # logical group name, for this called small-group, also can be functional
+      groupName: small-group
+      rayStartParams: {}
+      #pod template
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+        spec:
+          containers:
+          - name: ray-worker # must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc'
+            image: kiepdoden123/iris-training-ray:v1.2
+            resources:
+              limits:
+                cpu: "2"
+                nvidia.com/gpu: "2"
+              requests:
+                cpu: "2"
+                nvidia.com/gpu: "2"
+            volumeMounts:
+              - mountPath: /home/ray/result-storage
+                name: result-storage
+          volumes:
+          - name: result-storage
+            persistentVolumeClaim:
+              claimName: kham-pv-for-xgboost

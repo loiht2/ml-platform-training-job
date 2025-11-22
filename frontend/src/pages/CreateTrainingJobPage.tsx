@@ -13,6 +13,9 @@ import { getDefaultHyperparameters, getHyperparameterConfig, type Hyperparameter
 import { persistJob } from "@/lib/jobs-storage";
 import type { AlgorithmSource, Channel, JobPayload, StorageProvider, StoredJob, TrainingJobForm } from "@/types/training-job";
 import { CustomHyperparametersEditor } from "@/components/CustomHyperparametersEditor";
+import { ClusterSelector } from "@/components/ClusterSelector";
+import { jobsApi, APIError } from "@/lib/api-service";
+import { convertToBackendRequest, convertFromBackendResponse } from "@/lib/backend-converter";
 
 const builtinAlgorithms = [
   { id: "xgboost", name: "XGBoost" },
@@ -280,6 +283,7 @@ export default function CreateTrainingJobUI() {
   const [reviewOpen, setReviewOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<null | { ok: boolean; message: string }>(null);
+  const [selectedClusters, setSelectedClusters] = useState<string[]>([]);
 
   const payload = useMemo(() => formToPayload(form), [form]);
   const errors = useMemo(() => validateForm(form), [form]);
@@ -423,31 +427,47 @@ export default function CreateTrainingJobUI() {
     setSubmitting(true);
     try {
       const payload = formToPayload(form);
-      const job: StoredJob = {
-        id: form.jobName,
-        algorithm:
-          form.algorithm.source === "builtin"
-            ? builtinAlgorithms.find((a) => a.id === form.algorithm.algorithmName)?.name || "Built-in"
-            : form.algorithm.imageUri || "Custom Container",
-        createdAt: Date.now(),
-        priority: form.priority,
-        status: "Pending",
-        pendingUntil: Date.now() + 15000,
-      };
-
+      
+      // Convert frontend payload to backend API format
+      const backendRequest = convertToBackendRequest(payload, selectedClusters);
+      
+      // Submit to backend API
+      const backendResponse = await jobsApi.create(backendRequest);
+      
+      // Convert backend response to StoredJob format for local storage
+      const job: StoredJob = convertFromBackendResponse(backendResponse);
+      
+      // Also save locally for offline access
       const persistenceResult = await persistPayload(payload, job);
-      const serverMessage = persistenceResult.ok
-        ? ` JSON stored locally as ${persistenceResult.filename}.`
-        : " Local copy could not be saved (check logs).";
+      const localMessage = persistenceResult.ok
+        ? ` Also stored locally as ${persistenceResult.filename}.`
+        : "";
+      
       setSubmitResult({
         ok: true,
-        message: `Training job created.${serverMessage}`,
+        message: `Training job "${backendResponse.jobName}" created successfully! Job ID: ${backendResponse.id}.${localMessage}`,
       });
-      setReviewOpen(false);
-      navigate({ pathname: LIST_ROUTE, search: location.search }, { replace: true });
+      
+      // Close dialog and navigate after a short delay
+      setTimeout(() => {
+        setReviewOpen(false);
+        navigate({ pathname: LIST_ROUTE, search: location.search }, { replace: true });
+      }, 1500);
+      
     } catch (error) {
       console.error("Failed to submit job", error);
-      setSubmitResult({ ok: false, message: "Unexpected error while creating job." });
+      let errorMessage = "Unexpected error while creating job.";
+      
+      if (error instanceof APIError) {
+        errorMessage = `API Error: ${error.message}`;
+        if (error.status) {
+          errorMessage += ` (Status: ${error.status})`;
+        }
+      } else if (error instanceof Error) {
+        errorMessage = error.message;
+      }
+      
+      setSubmitResult({ ok: false, message: errorMessage });
     } finally {
       setSubmitting(false);
     }
@@ -927,6 +947,27 @@ export default function CreateTrainingJobUI() {
               </div>
             </CardContent>
           </Card>
+          </section>
+
+          {/* Section 5: Cluster Selection */}
+          <section>
+            <div className="mb-6">
+              <div className="inline-block px-3 py-1 text-xs font-semibold text-purple-700 bg-purple-50 rounded-full mb-3">
+                STEP 5
+              </div>
+              <h2 className="text-2xl font-bold text-slate-900">Target Clusters</h2>
+              <p className="mt-1 text-slate-600">Select which Karmada member clusters should run this job</p>
+            </div>
+            
+            <Card className="shadow-md border-purple-100 bg-gradient-to-br from-white to-purple-50/30 hover:shadow-lg transition-shadow">
+              <CardContent className="pt-6">
+                <ClusterSelector
+                  selectedClusters={selectedClusters}
+                  onSelectionChange={setSelectedClusters}
+                  disabled={submitting}
+                />
+              </CardContent>
+            </Card>
           </section>
         </div>
 

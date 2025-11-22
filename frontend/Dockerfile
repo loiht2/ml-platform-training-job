@@ -29,7 +29,7 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Add health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --quiet --tries=1 --spider http://localhost/ || exit 1
+  CMD wget --quiet --tries=1 --spider http://localhost:8080/ || exit 1
 
 # Use non-root user for better security
 RUN chown -R nginx:nginx /usr/share/nginx/html && \
@@ -40,5 +40,5 @@ RUN chown -R nginx:nginx /usr/share/nginx/html && \
 
 USER nginx
 
-EXPOSE 80
+EXPOSE 8080
 CMD ["nginx", "-g", "daemon off;"]

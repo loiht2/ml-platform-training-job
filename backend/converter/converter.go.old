@@ -1,0 +1,397 @@
+package converter
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/loiht2/ml-platform-training-job/backend/models"
+)
+
+// Converter handles conversion from frontend models to K8s resources
+type Converter struct{}
+
+// NewConverter creates a new converter instance
+func NewConverter() *Converter {
+	return &Converter{}
+}
+
+const (
+	// Default Docker image for training jobs - should match job-sample.yaml
+	DefaultTrainingImage = "kiepdoden123/iris-training-ray:v1.2"
+	// Default Ray version
+	DefaultRayVersion = "2.46.0"
+)
+
+
+
+// ConvertToRayJob converts TrainingJobRequest to Ray Job based on job-sample.yaml template
+func (c *Converter) ConvertToRayJob(req *models.TrainingJobRequest, jobID string) (map[string]interface{}, error) {
+	namespace := req.Namespace
+	if namespace == "" {
+		namespace = "default"
+	}
+
+	// Determine the training script entrypoint based on algorithm
+	entrypoint := c.buildEntrypoint(req.Algorithm.AlgorithmName)
+	
+	// Build runtime environment YAML with hyperparameters and Minio settings
+	runtimeEnvYAML := c.buildRuntimeEnvYAML(req)
+	
+	// Build PVC name for the job
+	pvcName := fmt.Sprintf("%s-pvc", req.JobName)
+
+	// Build Ray cluster spec
+	rayJob := map[string]interface{}{
+		"apiVersion": "ray.io/v1",
+		"kind":       "RayJob",
+		"metadata": map[string]interface{}{
+			"name":      req.JobName,
+			"namespace": namespace,
+			"labels": map[string]string{
+				"app":                     req.JobName,
+				"training-job-id":         jobID,
+				"algorithm":               req.Algorithm.AlgorithmName,
+			},
+			"annotations": map[string]string{
+				"training-job-id": jobID,
+				"priority":        fmt.Sprintf("%d", req.Priority),
+			},
+		},
+		"spec": map[string]interface{}{
+			"entrypoint":       entrypoint,
+			"runtimeEnvYAML":   runtimeEnvYAML,
+			"rayClusterSpec": map[string]interface{}{
+				"rayVersion":      DefaultRayVersion,
+				"headGroupSpec":   c.buildRayHeadGroupSpecFromParams(req, pvcName),
+				"workerGroupSpecs": []interface{}{
+					c.buildRayWorkerGroupSpecFromParams(req, pvcName),
+				},
+			},
+		},
+	}
+
+	return rayJob, nil
+}
+
+// buildEntrypoint creates the entrypoint command based on algorithm
+func (c *Converter) buildEntrypoint(algorithmName string) string {
+	// Map algorithm to training script
+	scriptMap := map[string]string{
+		"xgboost":     "/home/ray/xgboost_train.py",
+		"tensorflow":  "/home/ray/tensorflow_train.py",
+		"pytorch":     "/home/ray/pytorch_train.py",
+		"lightgbm":    "/home/ray/lightgbm_train.py",
+	}
+	
+	script := scriptMap[algorithmName]
+	if script == "" {
+		script = "/home/ray/train.py" // default
+	}
+	
+	return fmt.Sprintf("python %s", script)
+}
+
+// buildRuntimeEnvYAML creates the runtimeEnvYAML with capitalized hyperparameters and Minio settings
+func (c *Converter) buildRuntimeEnvYAML(req *models.TrainingJobRequest) string {
+	var sb strings.Builder
+	sb.WriteString("env_vars:\n")
+	
+	// Add training control variables
+	sb.WriteString("  # ==== TRAINING CONTROL ====\n")
+	sb.WriteString(fmt.Sprintf("  NUM_WORKER: \"%d\"\n", req.Resources.InstanceCount))
+	
+	useGPU := "false"
+	if req.Resources.InstanceResources.GPUCount > 0 {
+		useGPU = "true"
+	}
+	sb.WriteString(fmt.Sprintf("  USE_GPU: \"%s\"\n", useGPU))
+	sb.WriteString(fmt.Sprintf("  RUN_NAME: \"%s\"\n", req.JobName))
+	sb.WriteString("  STORAGE_PATH: \"/home/ray/result-storage\"\n")
+	sb.WriteString("  LABEL_COLUMN: \"target\"\n")
+	sb.WriteString("\n")
+	
+	// Add algorithm-specific hyperparameters (capitalized)
+	if len(req.Hyperparameters) > 0 {
+		sb.WriteString("  # ==== ALGORITHM HYPERPARAMETERS ====\n")
+		c.addCapitalizedHyperparameters(&sb, req.Hyperparameters)
+		sb.WriteString("\n")
+	}
+	
+	// Add custom hyperparameters
+	if len(req.CustomHyperparameters) > 0 {
+		sb.WriteString("  # ==== CUSTOM HYPERPARAMETERS ====\n")
+		for key, value := range req.CustomHyperparameters {
+			upperKey := strings.ToUpper(strings.ReplaceAll(key, "-", "_"))
+			sb.WriteString(fmt.Sprintf("  %s: \"%s\"\n", upperKey, value))
+		}
+		sb.WriteString("\n")
+	}
+	
+	// Add Minio settings from inputDataConfig and outputDataConfig
+	sb.WriteString("  # ==== MINIO SETTINGS ====\n")
+	c.addMinioSettings(&sb, req)
+	
+	return sb.String()
+}
+
+// addCapitalizedHyperparameters adds hyperparameters with capitalized keys
+func (c *Converter) addCapitalizedHyperparameters(sb *strings.Builder, hyperparams map[string]interface{}) {
+	// Iterate through algorithm-specific hyperparameters
+	for algoName, params := range hyperparams {
+		if algoName == "xgboost" || algoName == "tensorflow" || algoName == "pytorch" || algoName == "lightgbm" {
+			// Cast params to map[string]interface{}
+			if paramsMap, ok := params.(map[string]interface{}); ok {
+				for key, value := range paramsMap {
+					c.addHyperparameterEntry(sb, key, value)
+				}
+			}
+		}
+	}
+}
+
+// addHyperparameterEntry adds a single hyperparameter with proper formatting
+func (c *Converter) addHyperparameterEntry(sb *strings.Builder, key string, value interface{}) {
+	// Capitalize and convert dashes/dots to underscores
+	upperKey := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
+	
+	// Handle different value types
+	switch v := value.(type) {
+	case nil:
+		sb.WriteString(fmt.Sprintf("  %s: \"\"\n", upperKey))
+	case string:
+		sb.WriteString(fmt.Sprintf("  %s: \"%s\"\n", upperKey, v))
+	case int, int32, int64:
+		sb.WriteString(fmt.Sprintf("  %s: \"%v\"\n", upperKey, v))
+	case float32, float64:
+		sb.WriteString(fmt.Sprintf("  %s: \"%v\"\n", upperKey, v))
+	case bool:
+		sb.WriteString(fmt.Sprintf("  %s: \"%v\"\n", upperKey, v))
+	case []interface{}:
+		// Handle arrays (like eval_metric)
+		if len(v) > 0 {
+			// Join array elements with comma
+			elements := make([]string, len(v))
+			for i, elem := range v {
+				elements[i] = fmt.Sprintf("%v", elem)
+			}
+			sb.WriteString(fmt.Sprintf("  %s: \"%s\"\n", upperKey, strings.Join(elements, ",")))
+		} else {
+			sb.WriteString(fmt.Sprintf("  %s: \"\"\n", upperKey))
+		}
+	default:
+		// Try to convert to JSON string for complex types
+		jsonBytes, err := json.Marshal(v)
+		if err == nil {
+			sb.WriteString(fmt.Sprintf("  %s: '%s'\n", upperKey, string(jsonBytes)))
+		} else {
+			sb.WriteString(fmt.Sprintf("  %s: \"%v\"\n", upperKey, v))
+		}
+	}
+}
+
+// addMinioSettings adds Minio configuration from inputDataConfig and outputDataConfig
+func (c *Converter) addMinioSettings(sb *strings.Builder, req *models.TrainingJobRequest) {
+	// Extract Minio settings from first input data channel
+	if len(req.InputDataConfig) > 0 {
+		input := req.InputDataConfig[0]
+		
+		// Parse endpoint
+		endpoint := input.Endpoint
+		if endpoint == "" {
+			endpoint = "http://minio.minio-system.svc.cluster.local:9000"
+		}
+		sb.WriteString(fmt.Sprintf("  S3_ENDPOINT: \"%s\"\n", endpoint))
+		
+		// Extract bucket from storage URI (e.g., "storage://input" -> "input")
+		bucket := strings.TrimPrefix(input.Bucket, "storage://")
+		sb.WriteString(fmt.Sprintf("  S3_BUCKET: \"%s\"\n", bucket))
+		
+		// Add prefix/key information
+		prefix := strings.TrimSuffix(input.Prefix, "/")
+		sb.WriteString(fmt.Sprintf("  S3_TRAIN_KEY: \"%s/train.csv\"\n", prefix))
+		sb.WriteString(fmt.Sprintf("  S3_VAL_KEY: \"%s/val.csv\"\n", prefix))
+	} else {
+		// Default Minio settings
+		sb.WriteString("  S3_ENDPOINT: \"http://minio.minio-system.svc.cluster.local:9000\"\n")
+		sb.WriteString("  S3_BUCKET: \"datasets\"\n")
+		sb.WriteString("  S3_TRAIN_KEY: \"train.csv\"\n")
+		sb.WriteString("  S3_VAL_KEY: \"val.csv\"\n")
+	}
+	
+	// Add credentials (in production, these should come from secrets)
+	sb.WriteString("  S3_ACCESS_KEY: \"loiht2\"\n")
+	sb.WriteString("  S3_SECRET_KEY: \"E4XWyvYtlS6E9Q92DPq7sJBoJhaa1j7pbLHhgfeZ\"\n")
+	sb.WriteString("  S3_REGION: \"us-east-1\"\n")
+}
+
+// ConvertToPVC creates a PersistentVolumeClaim based on volumeSizeGB from params.json
+func (c *Converter) ConvertToPVC(req *models.TrainingJobRequest, jobID string) (*corev1.PersistentVolumeClaim, error) {
+	namespace := req.Namespace
+	if namespace == "" {
+		namespace = "default"
+	}
+	
+	pvcName := fmt.Sprintf("%s-pvc", req.JobName)
+	storageSize := fmt.Sprintf("%dGi", req.Resources.VolumeSizeGB)
+	
+	pvc := &corev1.PersistentVolumeClaim{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "PersistentVolumeClaim",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app":             req.JobName,
+				"training-job-id": jobID,
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteMany, // RWX for shared access between head and workers
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse(storageSize),
+				},
+			},
+		},
+	}
+	
+	return pvc, nil
+}
+
+
+
+// buildRayHeadGroupSpecFromParams creates Ray head group spec from params.json structure
+func (c *Converter) buildRayHeadGroupSpecFromParams(req *models.TrainingJobRequest, pvcName string) map[string]interface{} {
+	// Head pod gets +1 CPU compared to worker
+	headCPU := req.Resources.InstanceResources.CPUCores + 1
+	
+	resources := map[string]interface{}{
+		"limits": map[string]string{
+			"cpu": fmt.Sprintf("%d", headCPU),
+		},
+		"requests": map[string]string{
+			"cpu": fmt.Sprintf("%d", headCPU),
+		},
+	}
+	
+	container := map[string]interface{}{
+		"name":      "ray-head",
+		"image":     DefaultTrainingImage,
+		"resources": resources,
+		"ports": []interface{}{
+			map[string]interface{}{
+				"containerPort": 6379,
+				"name":          "gcs-server",
+			},
+			map[string]interface{}{
+				"containerPort": 8265,
+				"name":          "dashboard",
+			},
+			map[string]interface{}{
+				"containerPort": 10001,
+				"name":          "client",
+			},
+		},
+		"volumeMounts": []interface{}{
+			map[string]interface{}{
+				"mountPath": "/home/ray/result-storage",
+				"name":      "result-storage",
+			},
+		},
+	}
+	
+	return map[string]interface{}{
+		"rayStartParams": map[string]string{},
+		"template": map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"annotations": map[string]string{
+					"sidecar.istio.io/inject": "false",
+				},
+			},
+			"spec": map[string]interface{}{
+				"containers": []interface{}{container},
+				"volumes": []interface{}{
+					map[string]interface{}{
+						"name": "result-storage",
+						"persistentVolumeClaim": map[string]string{
+							"claimName": pvcName,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// buildRayWorkerGroupSpecFromParams creates Ray worker group spec from params.json structure
+func (c *Converter) buildRayWorkerGroupSpecFromParams(req *models.TrainingJobRequest, pvcName string) map[string]interface{} {
+	workerReplicas := req.Resources.InstanceCount
+	if workerReplicas == 0 {
+		workerReplicas = 1
+	}
+	
+	cpu := fmt.Sprintf("%d", req.Resources.InstanceResources.CPUCores)
+	
+	resources := map[string]interface{}{
+		"limits": map[string]string{
+			"cpu": cpu,
+		},
+		"requests": map[string]string{
+			"cpu": cpu,
+		},
+	}
+	
+	// Add GPU if requested
+	if req.Resources.InstanceResources.GPUCount > 0 {
+		gpuCount := fmt.Sprintf("%d", req.Resources.InstanceResources.GPUCount)
+		resources["limits"].(map[string]string)["nvidia.com/gpu"] = gpuCount
+		resources["requests"].(map[string]string)["nvidia.com/gpu"] = gpuCount
+	}
+	
+	container := map[string]interface{}{
+		"name":      "ray-worker",
+		"image":     DefaultTrainingImage,
+		"resources": resources,
+		"volumeMounts": []interface{}{
+			map[string]interface{}{
+				"mountPath": "/home/ray/result-storage",
+				"name":      "result-storage",
+			},
+		},
+	}
+	
+	return map[string]interface{}{
+		"replicas":       workerReplicas,
+		"minReplicas":    1,
+		"maxReplicas":    workerReplicas * 2,
+		"groupName":      "small-group",
+		"rayStartParams": map[string]string{},
+		"template": map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"annotations": map[string]string{
+					"sidecar.istio.io/inject": "false",
+				},
+			},
+			"spec": map[string]interface{}{
+				"containers": []interface{}{container},
+				"volumes": []interface{}{
+					map[string]interface{}{
+						"name": "result-storage",
+						"persistentVolumeClaim": map[string]string{
+							"claimName": pvcName,
+						},
+					},
+				},
+			},
+		},
+	}
+}

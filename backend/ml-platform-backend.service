@@ -1,0 +1,34 @@
+[Unit]
+Description=ML Platform Backend Service
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=mlplatform
+Group=mlplatform
+WorkingDirectory=/opt/ml-platform-backend
+
+# Environment variables
+Environment="PORT=8080"
+Environment="DATABASE_URL=postgresql://mlplatform:mlplatform123@localhost:5432/training_jobs?sslmode=disable"
+Environment="KARMADA_KUBECONFIG=/etc/ml-platform/karmada-kubeconfig"
+Environment="MGMT_KUBECONFIG=/etc/ml-platform/mgmt-kubeconfig"
+
+ExecStart=/opt/ml-platform-backend/backend
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ml-platform-backend
+
+[Install]
+WantedBy=multi-user.target

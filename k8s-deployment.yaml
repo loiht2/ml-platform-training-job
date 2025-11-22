@@ -1,0 +1,323 @@
+---
+# Namespace for ML Platform
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-platform
+---
+# PostgreSQL Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: ml-platform
+data:
+  POSTGRES_DB: training_jobs
+  POSTGRES_USER: mlplatform
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: ml-platform
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: mlplatform123
+---
+# PostgreSQL Persistent Storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: ml-platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName: standard  # Uncomment and adjust for your cluster
+---
+# PostgreSQL Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: ml-platform
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # Important for stateful apps with PVC
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: POSTGRES_PASSWORD
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - mlplatform
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - mlplatform
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: ml-platform
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5432
+    targetPort: 5432
+    protocol: TCP
+    name: postgres
+  selector:
+    app: postgres
+---
+# Backend Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: ml-platform
+data:
+  DATABASE_URL: "postgresql://mlplatform:mlplatform123@postgres:5432/training_jobs?sslmode=disable"
+---
+# Kubeconfig Secrets - REPLACE WITH YOUR BASE64 ENCODED CONFIGS
+# To generate: cat kubeconfig.yaml | base64 -w 0
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backend-kubeconfig
+  namespace: ml-platform
+type: Opaque
+data:
+  karmada-kubeconfig: REPLACE_WITH_BASE64_ENCODED_KARMADA_KUBECONFIG
+  mgmt-kubeconfig: REPLACE_WITH_BASE64_ENCODED_MGMT_KUBECONFIG
+---
+# Backend Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-platform-backend
+  namespace: ml-platform
+  labels:
+    app: ml-platform-backend
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ml-platform-backend
+  template:
+    metadata:
+      labels:
+        app: ml-platform-backend
+        version: v1
+    spec:
+      containers:
+      - name: backend
+        image: docker.io/loihoangthanh1411/ml-platform-backend:v0.2
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: backend-config
+              key: DATABASE_URL
+        - name: KARMADA_KUBECONFIG
+          value: /etc/kubeconfig/karmada-kubeconfig
+        - name: MGMT_KUBECONFIG
+          value: /etc/kubeconfig/mgmt-kubeconfig
+        - name: PORT
+          value: "8080"
+        volumeMounts:
+        - name: kubeconfig
+          mountPath: /etc/kubeconfig
+          readOnly: true
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: kubeconfig
+        secret:
+          secretName: backend-kubeconfig
+          defaultMode: 0400
+---
+# Backend Service (NodePort)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-platform-backend
+  namespace: ml-platform
+  labels:
+    app: ml-platform-backend
+spec:
+  type: NodePort
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+    nodePort: 30180  # Expose on port 30180 (range: 30000-32767)
+  selector:
+    app: ml-platform-backend
+---
+# Frontend Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-platform-frontend
+  namespace: ml-platform
+  labels:
+    app: ml-platform-frontend
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ml-platform-frontend
+  template:
+    metadata:
+      labels:
+        app: ml-platform-frontend
+        version: v1
+    spec:
+      containers:
+      - name: frontend
+        image: docker.io/loihoangthanh1411/ml-platform-frontend:v0.2
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: VITE_API_BASE_URL
+          value: "http://localhost:30080/api/v1"  # Update with your node IP if needed
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+---
+# Frontend Service (NodePort)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-platform-frontend
+  namespace: ml-platform
+  labels:
+    app: ml-platform-frontend
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+    nodePort: 30181  # Expose on port 30181 (range: 30000-32767)
+  selector:
+    app: ml-platform-frontend

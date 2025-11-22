@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ml-platform-postgres
+    environment:
+      POSTGRES_USER: mlplatform
+      POSTGRES_PASSWORD: mlplatform123
+      POSTGRES_DB: training_jobs
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlplatform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ml-platform-backend
+    environment:
+      DATABASE_URL: "postgresql://mlplatform:mlplatform123@postgres:5432/training_jobs?sslmode=disable"
+      PORT: "8080"
+      # Mount kubeconfig files - adjust paths as needed
+      KARMADA_KUBECONFIG: /kubeconfig/karmada-kubeconfig
+      MGMT_KUBECONFIG: /kubeconfig/mgmt-kubeconfig
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount kubeconfig directory - adjust the host path
+      - ${HOME}/.kube:/kubeconfig:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

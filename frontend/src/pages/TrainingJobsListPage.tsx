@@ -6,6 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { loadJobs } from "@/lib/jobs-storage";
 import type { JobStatus, StoredJob } from "@/types/training-job";
+import { jobsApi, APIError } from "@/lib/api-service";
+import { convertFromBackendResponse } from "@/lib/backend-converter";
+import { Loader2, RefreshCw } from "lucide-react";
 
 const JOB_STATUSES = new Set<JobStatus>(["Pending", "Running", "Succeeded", "Failed"]);
 
@@ -26,6 +29,9 @@ function CreateButton() {
 
 export default function TrainingJobsListPage() {
   const [jobs, setJobs] = useState<StoredJob[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [useBackend, setUseBackend] = useState(true);
 
   useEffect(() => {
     let ignore = false;
@@ -33,7 +39,27 @@ export default function TrainingJobsListPage() {
 
     async function load() {
       try {
-        const data = await loadJobs();
+        setLoading(true);
+        setError(null);
+        
+        let data: StoredJob[] = [];
+        
+        if (useBackend) {
+          try {
+            // Try to load from backend first
+            const backendJobs = await jobsApi.list();
+            data = backendJobs.map(job => convertFromBackendResponse(job));
+          } catch (backendError) {
+            console.error("Failed to load from backend, falling back to local storage", backendError);
+            setError(backendError instanceof APIError ? backendError.message : "Failed to connect to backend");
+            // Fall back to local storage
+            data = await loadJobs();
+          }
+        } else {
+          // Load from local storage only
+          data = await loadJobs();
+        }
+        
         if (!ignore) {
           const parsed = data.filter((item): item is StoredJob => {
             if (!item || typeof item !== "object") return false;
@@ -51,7 +77,14 @@ export default function TrainingJobsListPage() {
         }
       } catch (error) {
         console.error("Failed to load jobs", error);
-        if (!ignore) setJobs([]);
+        if (!ignore) {
+          setJobs([]);
+          setError(error instanceof Error ? error.message : "Failed to load jobs");
+        }
+      } finally {
+        if (!ignore) {
+          setLoading(false);
+        }
       }
     }
 
@@ -62,7 +95,7 @@ export default function TrainingJobsListPage() {
       ignore = true;
       if (timer) window.clearInterval(timer);
     };
-  }, []);
+  }, [useBackend]);
 
   useEffect(() => {
     if (!jobs.length) return;
@@ -126,7 +159,39 @@ export default function TrainingJobsListPage() {
 
       {/* Main Content */}
       <main className="mx-auto max-w-7xl px-6 py-10">
-        {sortedJobs.length === 0 ? (
+        {/* Error Banner */}
+        {error && (
+          <div className="mb-6 rounded-lg bg-yellow-50 border border-yellow-200 p-4">
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0">
+                <span className="text-yellow-600 text-xl">⚠️</span>
+              </div>
+              <div className="flex-1">
+                <h3 className="text-sm font-semibold text-yellow-900">Backend Connection Issue</h3>
+                <p className="text-sm text-yellow-700 mt-1">{error}</p>
+                <p className="text-xs text-yellow-600 mt-1">Showing locally stored jobs. Some jobs may be out of date.</p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setUseBackend(prev => !prev)}
+                className="flex-shrink-0"
+              >
+                <RefreshCw className="h-4 w-4 mr-1" />
+                Retry
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {loading && sortedJobs.length === 0 ? (
+          <Card>
+            <CardContent className="flex flex-col items-center justify-center py-16">
+              <Loader2 className="h-12 w-12 animate-spin text-blue-600 mb-4" />
+              <p className="text-slate-600">Loading jobs...</p>
+            </CardContent>
+          </Card>
+        ) : sortedJobs.length === 0 ? (
           <Card className="border-2 border-dashed border-slate-300">
             <CardContent className="flex flex-col items-center justify-center py-16 text-center">
               <div className="mb-4 h-16 w-16 rounded-full bg-slate-100 flex items-center justify-center">
