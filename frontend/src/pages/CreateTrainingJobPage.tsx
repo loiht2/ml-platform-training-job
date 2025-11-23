@@ -8,7 +8,8 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { ChevronDown, ChevronUp, Copy, FileJson2, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, FileJson2, Plus, Trash2, X } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import { getDefaultHyperparameters, getHyperparameterConfig, type HyperparameterValues } from "@/app/create/hyperparameters";
 import { persistJob } from "@/lib/jobs-storage";
 import type { AlgorithmSource, Channel, JobPayload, StorageProvider, StoredJob, TrainingJobForm } from "@/types/training-job";
@@ -135,28 +136,105 @@ async function persistPayload(payload: JobPayload, job: StoredJob): Promise<Pers
 }
 
 function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Channel) => void }) {
-  const sourceType = value.sourceType || "object-storage";
+  const sourceType = value.sourceType || "upload";
   const provider = value.storageProvider || DEFAULT_STORAGE_PROVIDER;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [featureSearch, setFeatureSearch] = useState("");
+  const [featureDropdownOpen, setFeatureDropdownOpen] = useState(false);
+  const featureDropdownRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (featureDropdownRef.current && !featureDropdownRef.current.contains(event.target as Node)) {
+        setFeatureDropdownOpen(false);
+      }
+    }
+    if (featureDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [featureDropdownOpen]);
 
   function updateChannel(partial: Partial<Channel>) {
     onChange({ ...value, ...partial });
   }
 
+  async function handleFileUpload(file: File | undefined) {
+    if (!file) {
+      updateChannel({ 
+        uploadFileName: "", 
+        csvColumns: [], 
+        featureNames: [], 
+        labelName: undefined 
+      });
+      setUploadError(null);
+      return;
+    }
+
+    const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+    if (file.size > MAX_FILE_SIZE) {
+      setUploadError("File size exceeds 50 MB limit");
+      return;
+    }
+
+    setUploadError(null);
+    updateChannel({ uploadFileName: file.name });
+
+    if (value.contentType === "csv") {
+      try {
+        const text = await file.text();
+        const lines = text.split("\n");
+        if (lines.length > 0) {
+          const headerLine = lines[0].trim();
+          const columns = headerLine.split(",").map(col => col.trim()).filter(col => col.length > 0);
+          updateChannel({ 
+            uploadFileName: file.name,
+            csvColumns: columns,
+            featureNames: [],
+            labelName: undefined
+          });
+        }
+      } catch (error) {
+        console.error("Error parsing CSV:", error);
+        setUploadError("Failed to parse CSV file");
+      }
+    }
+  }
+
+  const availableColumns = value.csvColumns || [];
+  const selectedFeatures = value.featureNames || [];
+  const selectedLabel = value.labelName;
+
+  const availableForFeatures = availableColumns.filter(col => col !== selectedLabel);
+  const availableForLabel = availableColumns.filter(col => !selectedFeatures.includes(col));
+
   return (
-    <div className="grid gap-4 py-2">
-      <div className="grid gap-3">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="grid gap-2">
-            <Label>Channel name</Label>
-            <Input value={value.channelName} onChange={(e) => updateChannel({ channelName: e.target.value })} placeholder="train" />
-          </div>
+    <div className="grid gap-3 py-1">
+      <div className="grid gap-y-3 gap-x-30 md:grid-cols-2">
+        <div className="flex items-center gap-2">
+          <Label className="w-32 flex-shrink-0">Channel name</Label>
+          <Input value={value.channelName} onChange={(e) => updateChannel({ channelName: e.target.value })} placeholder="train" className="flex-1" />
+        </div>
+        <div className="flex items-center gap-0">
+          <Label className="w-28 flex-shrink-0">Channel type</Label>
+          <Select 
+            value={value.channelType || "train"} 
+            onValueChange={(v) => updateChannel({ channelType: v as "train" | "validation" | "test" })}
+          >
+            <SelectTrigger className="flex-1"><SelectValue placeholder="Select type" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="train">Train</SelectItem>
+              <SelectItem value="validation">Validation</SelectItem>
+              <SelectItem value="test">Test</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
-      <div className="grid gap-4">
-        <div className="grid gap-2">
-          <Label>Source type</Label>
+      <div className="grid gap-3">
+        <div className="flex items-center gap-2">
+          <Label className="w-32 flex-shrink-0">Source type</Label>
           <RadioGroup
             value={sourceType}
             onValueChange={(v) => {
@@ -164,80 +242,204 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
               updateChannel({
                 sourceType: nextSource,
                 ...(nextSource === "upload"
-                  ? { storageProvider: undefined }
-                  : { uploadFileName: "", storageProvider: value.storageProvider || DEFAULT_STORAGE_PROVIDER }),
+                  ? { storageProvider: undefined, contentType: "csv" }
+                  : { uploadFileName: "", csvColumns: [], featureNames: [], labelName: undefined, storageProvider: value.storageProvider || DEFAULT_STORAGE_PROVIDER }),
               });
             }}
-            className="flex flex-wrap gap-3"
+            className="flex flex-wrap gap-2 flex-1"
           >
-            <div className="flex items-center gap-2 rounded-lg border px-3 py-2">
-              <RadioGroupItem value="object-storage" id={`channel-source-object-${value.id}`} />
-              <Label htmlFor={`channel-source-object-${value.id}`} className="font-normal">Object storage</Label>
-            </div>
-            <div className="flex items-center gap-2 rounded-lg border px-3 py-2">
+            <label htmlFor={`channel-source-upload-${value.id}`} className="flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer hover:bg-slate-50">
               <RadioGroupItem value="upload" id={`channel-source-upload-${value.id}`} />
-              <Label htmlFor={`channel-source-upload-${value.id}`} className="font-normal">Upload file</Label>
-            </div>
+              <span className="font-normal">Upload file</span>
+            </label>
+            <label htmlFor={`channel-source-object-${value.id}`} className="flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer hover:bg-slate-50">
+              <RadioGroupItem value="object-storage" id={`channel-source-object-${value.id}`} />
+              <span className="font-normal">Object storage</span>
+            </label>
           </RadioGroup>
         </div>
 
         {sourceType === "object-storage" ? (
-          <div className="grid gap-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="grid gap-2">
-                <Label>Provider</Label>
-                <Select value={provider} onValueChange={(v) => updateChannel({ storageProvider: v as StorageProvider })}>
-                  <SelectTrigger><SelectValue placeholder="Select provider" /></SelectTrigger>
-                  <SelectContent>
-                    {storageProviders.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+          <div className="grid gap-3">
+            <div className="flex items-start gap-3">
+              <Label className="w-32 flex-shrink-0">Provider</Label>
+              <Select value={provider} onValueChange={(v) => updateChannel({ storageProvider: v as StorageProvider })}>
+                <SelectTrigger className="flex-1"><SelectValue placeholder="Select provider" /></SelectTrigger>
+                <SelectContent>
+                  {storageProviders.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-8 sm:grid-cols-2">
+              <div className="flex items-center gap-2">
+                <Label className="w-32 flex-shrink-0">Bucket / Container</Label>
+                <Input value={value.bucket || ""} onChange={(e) => updateChannel({ bucket: e.target.value })} placeholder="storage://input" className="flex-1" />
+              </div>
+              <div className="flex items-center gap-2">
+                <Label className="w-32 flex-shrink-0">Prefix / Path</Label>
+                <Input value={value.prefix || ""} onChange={(e) => updateChannel({ prefix: e.target.value })} placeholder="datasets/default/" className="flex-1" />
               </div>
             </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="grid gap-2">
-                <Label>Bucket / Container</Label>
-                <Input value={value.bucket || ""} onChange={(e) => updateChannel({ bucket: e.target.value })} placeholder="storage://input" />
+            <div className="flex items-center gap-2">
+              <Label className="w-32 flex-shrink-0">Endpoint (optional)</Label>
+              <div className="flex-1">
+                <Input value={value.endpoint || ""} onChange={(e) => updateChannel({ endpoint: e.target.value })} placeholder="https://minio.example.com" />
+                <p className="text-xs text-slate-500 mt-1">Leave blank for managed services; specify an endpoint for self-hosted or custom object storage.</p>
               </div>
-              <div className="grid gap-2">
-                <Label>Prefix / Path</Label>
-                <Input value={value.prefix || ""} onChange={(e) => updateChannel({ prefix: e.target.value })} placeholder="datasets/default/" />
-              </div>
-            </div>
-            <div className="grid gap-2">
-              <Label>Endpoint (optional)</Label>
-              <Input value={value.endpoint || ""} onChange={(e) => updateChannel({ endpoint: e.target.value })} placeholder="https://minio.example.com" />
-              <p className="text-xs text-slate-500">Leave blank for managed services; specify an endpoint for self-hosted or custom object storage.</p>
             </div>
           </div>
         ) : (
-          <div className="grid gap-2">
-            <Label>Upload file</Label>
-            <input
-              ref={fileInputRef}
-              type="file"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                updateChannel({ uploadFileName: file ? file.name : "" });
-              }}
-              className="hidden"
-            />
-            <div className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 shadow-sm">
-              <span className={`text-sm truncate ${value.uploadFileName ? "text-slate-700" : "text-slate-400 italic"}`}>
-                {value.uploadFileName || "No file chosen"}
-              </span>
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                className="w-[94px]"
-                onClick={() => fileInputRef.current?.click()}
+          <div className="grid gap-3">
+            <div className="flex items-center gap-2">
+              <Label className="w-32 flex-shrink-0">Content type</Label>
+              <Select 
+                value={value.contentType || "csv"} 
+                onValueChange={(v) => updateChannel({ contentType: v as "csv" })}
               >
-                {value.uploadFileName ? "Change" : "Browse"}
-              </Button>
+                <SelectTrigger className="flex-1"><SelectValue placeholder="Select content type" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="csv">CSV</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
+
+            <div className="flex items-center gap-2">
+              <Label className="w-32 flex-shrink-0 flex flex-col items-start leading-tight">
+                <span>Upload file</span>
+                <span className="text-xs text-slate-500">(max 50 MB)</span>
+              </Label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  handleFileUpload(file);
+                }}
+                className="hidden"
+              />
+              <div className="flex flex-1 min-w-0 items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                <span className={`text-sm truncate ${value.uploadFileName ? "text-slate-700" : "text-slate-400 italic"}`}>
+                  {value.uploadFileName || "No file chosen"}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  className="w-[94px]"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  {value.uploadFileName ? "Change" : "Browse"}
+                </Button>
+              </div>
+              {uploadError && (
+                <p className="text-sm text-red-600">{uploadError}</p>
+              )}
+            </div>
+
+            {availableColumns.length > 0 && (
+              <>
+                <div className="flex items-start gap-4">
+                  <Label className="w-32 flex-shrink-0 pt-2">Feature name(s)</Label>
+                  <div className="relative flex-1" ref={featureDropdownRef}>
+                    <div
+                      className="flex min-h-9 w-full items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-sm cursor-pointer"
+                      onClick={() => setFeatureDropdownOpen(!featureDropdownOpen)}
+                    >
+                      <span className={selectedFeatures.length === 0 ? "text-slate-400" : ""}>
+                        {selectedFeatures.length === 0 ? "Select features" : `${selectedFeatures.length} selected`}
+                      </span>
+                      <svg width="15" height="15" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M4.18179 6.18181C4.35753 6.00608 4.64245 6.00608 4.81819 6.18181L7.49999 8.86362L10.1818 6.18181C10.3575 6.00608 10.6424 6.00608 10.8182 6.18181C10.9939 6.35755 10.9939 6.64247 10.8182 6.81821L7.81819 9.81821C7.73379 9.9026 7.61933 9.95001 7.49999 9.95001C7.38064 9.95001 7.26618 9.9026 7.18179 9.81821L4.18179 6.81821C4.00605 6.64247 4.00605 6.35755 4.18179 6.18181Z" fill="currentColor" fillRule="evenodd" clipRule="evenodd" />
+                      </svg>
+                    </div>
+                    {featureDropdownOpen && availableForFeatures.length > 0 && (
+                      <div className="absolute z-50 mt-1 max-h-60 w-full overflow-hidden rounded-md border bg-white shadow-lg">
+                        <div className="border-b p-2">
+                          <Input
+                            placeholder="Search columns..."
+                            value={featureSearch}
+                            onChange={(e) => setFeatureSearch(e.target.value)}
+                            className="h-8"
+                          />
+                        </div>
+                        <div className="max-h-48 overflow-y-auto p-1">
+                          {availableForFeatures.filter(col => 
+                            col.toLowerCase().includes(featureSearch.toLowerCase())
+                          ).length === 0 ? (
+                            <div className="py-6 text-center text-sm text-slate-500">No columns found</div>
+                          ) : (
+                            availableForFeatures
+                              .filter(col => col.toLowerCase().includes(featureSearch.toLowerCase()))
+                              .map((col) => (
+                                <div
+                                  key={col}
+                                  className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-sm cursor-pointer hover:bg-slate-100"
+                                  onClick={() => {
+                                    if (selectedFeatures.includes(col)) {
+                                      updateChannel({ featureNames: selectedFeatures.filter(f => f !== col) });
+                                    } else {
+                                      updateChannel({ featureNames: [...selectedFeatures, col] });
+                                    }
+                                    setFeatureDropdownOpen(false);
+                                  }}
+                                >
+                                  <div className="flex h-4 w-4 items-center justify-center rounded border border-slate-300">
+                                    {selectedFeatures.includes(col) && (
+                                      <svg width="12" height="12" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                        <path d="M11.4669 3.72684C11.7558 3.91574 11.8369 4.30308 11.648 4.59198L7.39799 11.092C7.29783 11.2452 7.13556 11.3467 6.95402 11.3699C6.77247 11.3931 6.58989 11.3355 6.45446 11.2124L3.70446 8.71241C3.44905 8.48022 3.43023 8.08494 3.66242 7.82953C3.89461 7.57412 4.28989 7.55529 4.5453 7.78749L6.75292 9.79441L10.6018 3.90792C10.7907 3.61902 11.178 3.53795 11.4669 3.72684Z" fill="currentColor" fillRule="evenodd" clipRule="evenodd" />
+                                      </svg>
+                                    )}
+                                  </div>
+                                  <span>{col}</span>
+                                </div>
+                              ))
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {selectedFeatures.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {selectedFeatures.map((feature) => (
+                          <Badge key={feature} variant="secondary" className="flex items-center gap-1 pl-2 pr-1">
+                            <span>{feature}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                updateChannel({ featureNames: selectedFeatures.filter(f => f !== feature) });
+                              }}
+                              className="ml-1 rounded-sm hover:bg-slate-300"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Label className="w-32 flex-shrink-0">Label name</Label>
+                  <Select 
+                    value={selectedLabel || ""} 
+                    onValueChange={(col) => updateChannel({ labelName: col })}
+                    disabled={availableForLabel.length === 0}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder={availableForLabel.length === 0 ? "No columns available" : "Select label column"} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableForLabel.map((col) => (
+                        <SelectItem key={col} value={col}>{col}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -260,17 +462,19 @@ export default function CreateTrainingJobUI() {
       instanceResources: { cpuCores: 4, memoryGiB: 16, gpuCount: 0 },
       instanceCount: 1,
       volumeSizeGB: 50,
+      distributedTraining: false,
     },
     stoppingCondition: { maxRuntimeSeconds: 3600 * 4 },
     inputDataConfig: [
       {
         id: randomId("channel"),
         channelName: "train",
-        sourceType: "object-storage",
-        storageProvider: DEFAULT_STORAGE_PROVIDER,
-        endpoint: "https://minio.local",
-        bucket: "storage://input",
-        prefix: "datasets/default/",
+        sourceType: "upload",
+        channelType: "train",
+        contentType: "csv",
+        csvColumns: [],
+        featureNames: [],
+        labelName: undefined,
       },
     ],
     outputDataConfig: { artifactUri: "storage://output/artifacts/" },
@@ -347,11 +551,16 @@ export default function CreateTrainingJobUI() {
     const next: Channel = {
       id: randomId("channel"),
       channelName: template?.channelName || "",
-      sourceType: template?.sourceType || "object-storage",
-      storageProvider: template?.storageProvider || DEFAULT_STORAGE_PROVIDER,
-      endpoint: template?.endpoint || "https://minio.local",
-      bucket: template?.bucket || "storage://input",
-      prefix: template?.prefix || "datasets/default/",
+      sourceType: template?.sourceType || "upload",
+      channelType: template?.channelType || "train",
+      contentType: template?.contentType || "csv",
+      csvColumns: template?.csvColumns || [],
+      featureNames: template?.featureNames || [],
+      labelName: template?.labelName,
+      storageProvider: template?.storageProvider,
+      endpoint: template?.endpoint,
+      bucket: template?.bucket,
+      prefix: template?.prefix,
       uploadFileName: template?.uploadFileName || "",
     };
     setForm((prev) => ({
@@ -518,78 +727,45 @@ export default function CreateTrainingJobUI() {
       </header>
 
       {/* Main Content */}
-      <main className="mx-auto max-w-6xl px-6 py-12">
-        <div className="space-y-12">
+      <main className="mx-auto max-w-6xl px-6 py-8">
+        <div className="space-y-4">
           
           {/* Section 1: Basic Information */}
           <section>
-            <div className="mb-6">
-              <div className="inline-block px-3 py-1 text-xs font-semibold text-blue-700 bg-blue-50 rounded-full mb-3">
-                STEP 1
-              </div>
-              <h2 className="text-2xl font-bold text-slate-900">Basic Information</h2>
-              <p className="mt-1 text-slate-600">Set the job name and execution priority</p>
+            <div className="mb-2">
+              <h2 className="text-xl font-bold text-slate-900">Basic Information</h2>
+              <p className="mt-1 text-sm text-slate-600">Set the job name</p>
             </div>
             
             <Card className="shadow-md border-blue-100 bg-gradient-to-br from-white to-blue-50/30 hover:shadow-lg transition-shadow">
-              <CardContent className="pt-6 grid gap-6 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] md:items-start">
-                <div>
-                  <Label className="text-base font-semibold">Job Name</Label>
-                  <div className="flex gap-3 mt-2">
-                    <Input 
-                      value={form.jobName} 
-                      onChange={(e) => update("jobName", e.target.value)} 
-                      placeholder="train-2025…"
-                      className="flex-1"
-                    />
-                    <Button 
-                      type="button" 
-                      variant="outline" 
-                      onClick={() => update("jobName", generateJobName("train"))}
-                      className="whitespace-nowrap"
-                    >
-                      Generate
-                    </Button>
-                  </div>
-                  {!JOB_NAME_REGEX.test(form.jobName || "") && (
-                    <p className="text-sm text-red-600 mt-2">Must be lowercase alphanumerics and dashes; max 63 chars; cannot start/end with a dash.</p>
-                  )}
-                </div>
-                
-                <div>
-                  <Label className="text-base font-semibold">Priority</Label>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={1000}
-                    value={form.priority}
-                    onChange={(e) => {
-                      const raw = Number(e.target.value);
-                      const next = Number.isFinite(raw) ? Math.min(1000, Math.max(1, raw)) : form.priority;
-                      update("priority", next);
-                    }}
-                    className="mt-2"
+              <CardContent className="pt-2">
+                <div className="flex items-center gap-2">
+                  <Label className="text-sm font-semibold w-32 flex-shrink-0">Job Name</Label>
+                  <Input 
+                    value={form.jobName} 
+                    onChange={(e) => update("jobName", e.target.value)} 
+                    placeholder="train-2025…"
+                    className="flex-1"
                   />
-                  <p className="text-sm text-slate-500 mt-2">Range: 1 (lowest) to 1000 (highest)</p>
                 </div>
+                {!JOB_NAME_REGEX.test(form.jobName || "") && (
+                  <p className="text-xs text-red-600 mt-1 ml-36">Must be lowercase alphanumerics and dashes; max 63 chars; cannot start/end with a dash.</p>
+                )}
               </CardContent>
             </Card>
           </section>
 
           {/* Section 2: Algorithm */}
           <section>
-            <div className="mb-6">
-              <div className="inline-block px-3 py-1 text-xs font-semibold text-purple-700 bg-purple-50 rounded-full mb-3">
-                STEP 2
-              </div>
-              <h2 className="text-2xl font-bold text-slate-900">Algorithm Selection</h2>
-              <p className="mt-1 text-slate-600">Choose your machine learning algorithm</p>
+            <div className="mb-2">
+              <h2 className="text-xl font-bold text-slate-900">Algorithm Selection</h2>
+              <p className="mt-1 text-sm text-slate-600">Choose your machine learning algorithm</p>
             </div>
 
           <Card className="shadow-md border-purple-100 bg-gradient-to-br from-white to-purple-50/30 hover:shadow-lg transition-shadow">
-            <CardContent className="pt-6 space-y-6">
-              <div className="grid gap-2">
-                <Label className="text-base font-semibold">Source</Label>
+            <CardContent className="pt-2 space-y-3">
+              <div className="flex items-center gap-2">
+                <Label className="text-sm font-semibold w-32 flex-shrink-0">Source</Label>
                 <RadioGroup
                   value={form.algorithm.source}
                   onValueChange={(v) => {
@@ -601,30 +777,26 @@ export default function CreateTrainingJobUI() {
                       imageUri: next === "container" ? form.algorithm.imageUri || "" : undefined,
                     });
                   }}
-                  className="flex flex-wrap gap-3"
+                  className="flex flex-wrap gap-2 flex-1"
                 >
-                  <div className="flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-3 hover:border-purple-300 hover:bg-purple-50/50 transition-colors cursor-pointer">
+                  <label htmlFor="algorithm-source-builtin" className="flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 hover:border-purple-300 hover:bg-purple-50/50 transition-colors cursor-pointer">
                     <RadioGroupItem value="builtin" id="algorithm-source-builtin" />
-                    <Label htmlFor="algorithm-source-builtin" className="font-medium cursor-pointer">
-                      Built-in algorithm
-                    </Label>
-                  </div>
-                  <div className="flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-3 hover:border-purple-300 hover:bg-purple-50/50 transition-colors cursor-pointer">
+                    <span className="font-medium text-sm">Built-in algorithm</span>
+                  </label>
+                  <label htmlFor="algorithm-source-container" className="flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 hover:border-purple-300 hover:bg-purple-50/50 transition-colors cursor-pointer">
                     <RadioGroupItem value="container" id="algorithm-source-container" />
-                    <Label htmlFor="algorithm-source-container" className="font-medium cursor-pointer">
-                      Custom container
-                    </Label>
-                  </div>
+                    <span className="font-medium text-sm">Custom container</span>
+                  </label>
                 </RadioGroup>
               </div>
               {form.algorithm.source === "builtin" ? (
-                <div className="grid gap-2">
-                  <Label>Built-in algorithm</Label>
+                <div className="flex items-center gap-2">
+                  <Label className="text-sm font-semibold w-32 flex-shrink-0">Built-in algorithm</Label>
                   <Select
                     value={form.algorithm.algorithmName}
                     onValueChange={(value) => updateAlgorithm({ algorithmName: value, imageUri: undefined })}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger className="flex-1">
                       <SelectValue placeholder="Select algorithm" />
                     </SelectTrigger>
                     <SelectContent>
@@ -637,27 +809,29 @@ export default function CreateTrainingJobUI() {
                   </Select>
                 </div>
               ) : (
-                <div className="grid gap-2">
-                  <Label>Container image URI</Label>
-                  <Input
-                    value={form.algorithm.imageUri || ""}
-                    onChange={(e) => updateAlgorithm({ imageUri: e.target.value, algorithmName: undefined })}
-                    placeholder="registry.example.com/ml/training:latest"
-                  />
-                  <p className="text-xs text-slate-500">Provide a fully qualified container image URI.</p>
+                <div className="flex items-start gap-4">
+                  <Label className="text-sm font-semibold w-32 flex-shrink-0 pt-2">Container image URI</Label>
+                  <div className="flex-1 space-y-1">
+                    <Input
+                      value={form.algorithm.imageUri || ""}
+                      onChange={(e) => updateAlgorithm({ imageUri: e.target.value, algorithmName: undefined })}
+                      placeholder="registry.example.com/ml/training:latest"
+                    />
+                    <p className="text-xs text-slate-500">Provide a fully qualified container image URI.</p>
+                  </div>
                 </div>
               )}
             </CardContent>
           </Card>
 
           {form.algorithm.source === "builtin" && activeAlgorithmId && (
-            <Card className="shadow-sm mt-4">
-              <CardContent className="pt-6">
-                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-6">
+            <Card className="shadow-sm mt-3">
+              <CardContent className="pt-2">
+                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between mb-4">
                   <div>
                     <h3 className="text-lg font-semibold text-slate-900">Hyperparameters</h3>
                     <p className="text-sm text-slate-600 mt-1">
-                      Fine-tune settings for {activeHyperparameterConfig?.label ?? "the selected algorithm"}
+                      Set hyperparameters for {activeHyperparameterConfig?.label ?? "the selected algorithm"}
                     </p>
                   </div>
                   {HyperparameterFormComponent && (
@@ -666,7 +840,7 @@ export default function CreateTrainingJobUI() {
                     </Button>
                   )}
                 </div>
-                <div className="space-y-4">
+                <div className="max-h-[600px] overflow-y-auto pr-2">
                   {HyperparameterFormComponent ? (
                     <HyperparameterFormComponent
                       value={activeHyperparameters as HyperparameterValues}
@@ -684,8 +858,8 @@ export default function CreateTrainingJobUI() {
           )}
 
           {form.algorithm.source === "container" && (
-            <Card className="shadow-sm mt-4 border-blue-200 bg-gradient-to-br from-blue-50 via-white to-indigo-50">
-              <CardContent className="pt-6">
+            <Card className="shadow-sm mt-3 border-blue-200 bg-gradient-to-br from-blue-50 via-white to-indigo-50">
+              <CardContent className="pt-2">
                 <CustomHyperparametersEditor
                   value={form.customHyperparameters || {}}
                   onChange={updateCustomHyperparameters}
@@ -695,21 +869,28 @@ export default function CreateTrainingJobUI() {
           )}
           </section>
 
-          {/* Section 3: Compute Resources */}
-          <section>
-            <div className="mb-6">
-              <div className="inline-block px-3 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 rounded-full mb-3">
-                STEP 3
-              </div>
-              <h2 className="text-2xl font-bold text-slate-900">Compute Resources</h2>
-              <p className="mt-1 text-slate-600">Allocate CPU, memory, GPU, and configure distributed training</p>
+          {/* Section 3: Compute Resources - Temporarily Hidden */}
+          {false && (<section>
+            <div className="mb-4">
+              <h2 className="text-xl font-bold text-slate-900">Compute Resources</h2>
+              <p className="mt-1 text-sm text-slate-600">Allocate CPU, memory, GPU, and configure distributed training</p>
             </div>
 
           <Card className="shadow-md border-emerald-100 bg-gradient-to-br from-white to-emerald-50/30 hover:shadow-lg transition-shadow">
-            <CardContent className="pt-6 space-y-6">
-              <div className="grid gap-6 md:grid-cols-3">
+            <CardContent className="pt-4 space-y-4">
+              <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-emerald-200">
                 <div>
-                  <Label className="text-base font-semibold">CPUs per instance</Label>
+                  <Label className="text-base font-semibold">Enable distributed training</Label>
+                  <p className="text-sm text-slate-500 mt-1">Train across multiple instances simultaneously</p>
+                </div>
+                <Switch
+                  checked={form.resources.distributedTraining || false}
+                  onCheckedChange={(checked) => updateResources({ distributedTraining: checked })}
+                />
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="grid gap-1.5">
+                  <Label className="text-sm font-semibold">CPUs per instance</Label>
                   <Input
                     type="number"
                     min={1}
@@ -721,11 +902,10 @@ export default function CreateTrainingJobUI() {
                         instanceResources: { ...form.resources.instanceResources, cpuCores: next },
                       });
                     }}
-                    className="mt-2"
                   />
                 </div>
-                <div>
-                  <Label className="text-base font-semibold">Memory (GiB) per instance</Label>
+                <div className="grid gap-1.5">
+                  <Label className="text-sm font-semibold">Memory (GiB) per instance</Label>
                   <Input
                     type="number"
                     min={1}
@@ -737,11 +917,10 @@ export default function CreateTrainingJobUI() {
                         instanceResources: { ...form.resources.instanceResources, memoryGiB: next },
                       });
                     }}
-                    className="mt-2"
                   />
                 </div>
-                <div>
-                  <Label className="text-base font-semibold">GPUs per instance</Label>
+                <div className="grid gap-1.5">
+                  <Label className="text-sm font-semibold">GPUs per instance</Label>
                   <Input
                     type="number"
                     min={0}
@@ -753,13 +932,12 @@ export default function CreateTrainingJobUI() {
                         instanceResources: { ...form.resources.instanceResources, gpuCount: next },
                       });
                     }}
-                    className="mt-2"
                   />
                 </div>
               </div>
-              <div className="grid gap-6 md:grid-cols-2">
-                <div>
-                  <Label className="text-base font-semibold">Instance count</Label>
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label className="text-sm font-semibold">Instance count</Label>
                   <Input
                     type="number"
                     min={1}
@@ -769,11 +947,10 @@ export default function CreateTrainingJobUI() {
                       const next = Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : form.resources.instanceCount;
                       updateResources({ instanceCount: next });
                     }}
-                    className="mt-2"
                   />
                 </div>
-                <div>
-                  <Label className="text-base font-semibold">Volume size (GiB)</Label>
+                <div className="grid gap-1.5">
+                  <Label className="text-sm font-semibold">Volume size (GiB)</Label>
                   <Input
                     type="number"
                     min={1}
@@ -783,36 +960,32 @@ export default function CreateTrainingJobUI() {
                       const next = Number.isFinite(raw) ? Math.max(1, Math.floor(raw)) : form.resources.volumeSizeGB;
                       updateResources({ volumeSizeGB: next });
                     }}
-                    className="mt-2"
                   />
                 </div>
               </div>
             </CardContent>
           </Card>
-          </section>
+          </section>)}
 
           {/* Section 4: Data & Storage */}
           <section>
-            <div className="mb-6">
-              <div className="inline-block px-3 py-1 text-xs font-semibold text-indigo-700 bg-indigo-50 rounded-full mb-3">
-                STEP 4
-              </div>
-              <h2 className="text-2xl font-bold text-slate-900">Data & Storage</h2>
-              <p className="mt-1 text-slate-600">Configure training datasets and output locations</p>
+            <div className="mb-2">
+              <h2 className="text-xl font-bold text-slate-900">Data & Storage</h2>
+              <p className="mt-1 text-sm text-slate-600">Create a channel for each input dataset. For example, your algorithm might accept train, validation, and test input channels.</p>
             </div>
 
           <Card className="shadow-md border-indigo-100 bg-gradient-to-br from-white to-indigo-50/30 hover:shadow-lg transition-shadow">
-            <CardContent className="pt-6">
-              <h3 className="text-lg font-semibold text-slate-900 mb-4">Input Channels</h3>
-              <p className="text-sm text-slate-600 mb-6">Configure training datasets from object storage or file uploads</p>
+            <CardContent className="pt-2">
+              <h3 className="text-base font-semibold text-slate-900 mb-2">Input Channels</h3>
+              <p className="text-sm text-slate-600 mb-4">Configure training datasets from object storage or file uploads</p>
               
-              <div className="space-y-4">
+              <div className="space-y-3">
               {form.inputDataConfig.length === 0 && (
                 <p className="text-sm text-slate-600 py-8 text-center bg-gradient-to-br from-slate-50 to-indigo-50 rounded-lg border border-dashed border-indigo-200">No channels configured yet. Add at least one to continue.</p>
               )}
               {form.inputDataConfig.map((channel, idx) => (
-                <div key={channel.id} className="rounded-lg border border-indigo-200/50 bg-gradient-to-br from-slate-50 to-indigo-50/40 p-5 hover:border-indigo-300 transition-colors">
-                  <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                <div key={channel.id} className="rounded-lg border border-indigo-200/50 bg-gradient-to-br from-slate-50 to-indigo-50/40 p-3 hover:border-indigo-300 transition-colors">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                     <div>
                       <p className="text-base font-semibold text-slate-900">{channel.channelName || `Channel ${idx + 1}`}</p>
                       <p className="text-sm text-slate-500">#{idx + 1}</p>
@@ -862,7 +1035,7 @@ export default function CreateTrainingJobUI() {
                       </Button>
                     </div>
                   </div>
-                  <div className="bg-white rounded-md p-4">
+                  <div className="bg-white rounded-md p-3">
                     <ChannelEditor
                       value={channel}
                       onChange={(next) => {
@@ -874,26 +1047,23 @@ export default function CreateTrainingJobUI() {
                   </div>
                 </div>
               ))}
-              <div className="flex flex-wrap gap-3 pt-2">
-                <Button type="button" onClick={() => addChannel({ channelName: `channel-${form.inputDataConfig.length + 1}` })} className="bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-semibold shadow-sm hover:shadow-md transition-all">
+              <div className="flex flex-wrap gap-2 pt-1">
+                <Button type="button" onClick={() => addChannel({ channelName: `channel-${form.inputDataConfig.length + 1}`, channelType: "train" })} className="bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-semibold shadow-sm hover:shadow-md transition-all">
                   <Plus className="mr-2 h-4 w-4" /> Add channel
-                </Button>
-                <Button type="button" variant="outline" onClick={() => addChannel({ channelName: "validation" })} className="border-indigo-300 text-indigo-700 hover:bg-indigo-50 hover:border-indigo-400 transition-colors">
-                  Quick add validation
                 </Button>
               </div>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="shadow-md border-pink-100 bg-gradient-to-br from-white to-pink-50/30 hover:shadow-lg transition-shadow mt-6">
-            <CardContent className="pt-6">
-              <h3 className="text-lg font-semibold text-slate-900 mb-2">Stopping Condition</h3>
-              <p className="text-sm text-slate-600 mb-6">Set maximum runtime limits to control training duration</p>
+          {false && (<Card className="shadow-md border-pink-100 bg-gradient-to-br from-white to-pink-50/30 hover:shadow-lg transition-shadow mt-4">
+            <CardContent className="pt-4">
+              <h3 className="text-base font-semibold text-slate-900 mb-2">Stopping Condition</h3>
+              <p className="text-sm text-slate-600 mb-3">Set maximum runtime limits to control training duration</p>
               
-              <div className="grid gap-6 md:grid-cols-2">
-                <div>
-                  <Label className="text-base font-semibold">Hours</Label>
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label className="text-sm font-semibold">Hours</Label>
                   <Input
                     type="number"
                     min={0}
@@ -904,11 +1074,10 @@ export default function CreateTrainingJobUI() {
                       const total = secondsFromHM(next, maxRuntimeMinutes);
                       update("stoppingCondition", { maxRuntimeSeconds: total });
                     }}
-                    className="mt-2"
                   />
                 </div>
-                <div>
-                  <Label className="text-base font-semibold">Minutes</Label>
+                <div className="grid gap-1.5">
+                  <Label className="text-sm font-semibold">Minutes</Label>
                   <Input
                     type="number"
                     min={0}
@@ -920,47 +1089,63 @@ export default function CreateTrainingJobUI() {
                       const total = secondsFromHM(maxRuntimeHours, next);
                       update("stoppingCondition", { maxRuntimeSeconds: total });
                     }}
-                    className="mt-2"
                   />
                 </div>
               </div>
-              <p className="text-sm text-slate-600 mt-4">
+              <p className="text-sm text-slate-600 mt-2">
                 Total runtime limit: <span className="font-semibold">{Math.max(0, maxRuntimeHours)}h {Math.max(0, maxRuntimeMinutes)}m</span>
               </p>
             </CardContent>
+          </Card>)}
+
+          <Card className="shadow-md border-rose-100 bg-gradient-to-br from-white to-rose-50/30 hover:shadow-lg transition-shadow mt-4">
+            <CardContent className="pt-2">
+              <h3 className="text-base font-semibold text-slate-900 mb-2">Checkpoint config – optional</h3>
+              <p className="text-sm text-slate-600 mb-3">The algorithm is responsible for periodically generating checkpoints.</p>
+              
+              <div className="flex items-start gap-4">
+                <Label className="text-sm font-semibold w-32 flex-shrink-0 pt-2">Output path</Label>
+                <div className="flex-1">
+                  <Input
+                    value={form.outputDataConfig.artifactUri}
+                    onChange={(e) => update("outputDataConfig", { artifactUri: e.target.value })}
+                    placeholder="storage://output/artifacts/"
+                  />
+                  <p className="text-sm text-slate-500 mt-2">Provide a URI for an object store or shared filesystem where the job can write results.</p>
+                </div>
+              </div>
+            </CardContent>
           </Card>
 
-          <Card className="shadow-md border-rose-100 bg-gradient-to-br from-white to-rose-50/30 hover:shadow-lg transition-shadow mt-6">
-            <CardContent className="pt-6">
-              <h3 className="text-lg font-semibold text-slate-900 mb-2">Output Configuration</h3>
-              <p className="text-sm text-slate-600 mb-6">Specify where to save model artifacts, checkpoints, and logs</p>
+          <Card className="shadow-md border-indigo-100 bg-gradient-to-br from-white to-indigo-50/30 hover:shadow-lg transition-shadow mt-4">
+            <CardContent className="pt-2">
+              <h3 className="text-base font-semibold text-slate-900 mb-2">Output data configuration</h3>
+              <p className="text-sm text-slate-600 mb-3">Training outputs such as logs and metrics are stored, enabling visualization in tools like TensorBoard.</p>
               
-              <div>
-                <Label className="text-base font-semibold">Artifact URI</Label>
-                <Input
-                  value={form.outputDataConfig.artifactUri}
-                  onChange={(e) => update("outputDataConfig", { artifactUri: e.target.value })}
-                  placeholder="storage://output/artifacts/"
-                  className="mt-2"
-                />
-                <p className="text-sm text-slate-500 mt-2">Provide a URI for an object store or shared filesystem where the job can write results.</p>
+              <div className="flex items-start gap-4">
+                <Label className="text-sm font-semibold w-32 flex-shrink-0 pt-2">Output data path</Label>
+                <div className="flex-1">
+                  <Input
+                    value={form.outputDataConfig.artifactUri}
+                    onChange={(e) => update("outputDataConfig", { artifactUri: e.target.value })}
+                    placeholder="storage://output/logs/"
+                  />
+                  <p className="text-sm text-slate-500 mt-2">Specify where training logs and metrics should be stored for analysis and visualization.</p>
+                </div>
               </div>
             </CardContent>
           </Card>
           </section>
 
           {/* Section 5: Cluster Selection */}
-          <section>
-            <div className="mb-6">
-              <div className="inline-block px-3 py-1 text-xs font-semibold text-purple-700 bg-purple-50 rounded-full mb-3">
-                STEP 5
-              </div>
-              <h2 className="text-2xl font-bold text-slate-900">Target Clusters</h2>
-              <p className="mt-1 text-slate-600">Select which Karmada member clusters should run this job</p>
+          {false && (<section>
+            <div className="mb-2">
+              <h2 className="text-xl font-bold text-slate-900">Target Clusters</h2>
+              <p className="mt-1 text-sm text-slate-600">Select which Karmada member clusters should run this job</p>
             </div>
             
             <Card className="shadow-md border-purple-100 bg-gradient-to-br from-white to-purple-50/30 hover:shadow-lg transition-shadow">
-              <CardContent className="pt-6">
+              <CardContent className="pt-2">
                 <ClusterSelector
                   selectedClusters={selectedClusters}
                   onSelectionChange={setSelectedClusters}
@@ -968,7 +1153,7 @@ export default function CreateTrainingJobUI() {
                 />
               </CardContent>
             </Card>
-          </section>
+          </section>)}
         </div>
 
         {/* Submit Section */}

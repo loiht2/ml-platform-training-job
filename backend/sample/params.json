@@ -1,6 +1,5 @@
 {
   "jobName": "train-20251111052644-oj2y",
-  "priority": 500,
   "algorithm": {
     "source": "builtin",
     "algorithmName": "xgboost"

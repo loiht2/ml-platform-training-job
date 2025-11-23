@@ -15,6 +15,11 @@ export type Channel = {
   bucket?: string;
   prefix?: string;
   uploadFileName?: string;
+  channelType?: "train" | "validation" | "test";
+  contentType?: "csv";
+  csvColumns?: string[];
+  featureNames?: string[];
+  labelName?: string;
 };
 
 export type InstanceResources = {
@@ -27,6 +32,7 @@ export type TrainingResources = {
   instanceResources: InstanceResources;
   instanceCount: number;
   volumeSizeGB: number;
+  distributedTraining?: boolean;
 };
 
 export type TrainingJobForm = {
