@@ -13,7 +13,7 @@ type TrainingJobRequest struct {
 	OutputDataConfig   OutputDataConfig    `json:"outputDataConfig"`
 	Hyperparameters    HyperparametersMap  `json:"hyperparameters"`
 	CustomHyperparameters map[string]interface{} `json:"customHyperparameters"`
-	TargetClusters     []string            `json:"targetClusters"` // From frontend
+	// Removed: TargetClusters - single-cluster deployment only
 	Namespace          string              `json:"namespace"`      // Optional override
 	Entrypoint         string              `json:"entrypoint"`     // Optional override
 	HeadImage          string              `json:"headImage"`      // Optional override
@@ -105,16 +105,20 @@ type XGBoostHyperparameters struct {
 
 // TrainingJobResponse represents the response sent to frontend
 type TrainingJobResponse struct {
-	ID        string                 `json:"id"`
-	JobName   string                 `json:"jobName"`
-	Namespace string                 `json:"namespace"`
-	Algorithm string                 `json:"algorithm"`
-	Priority  int                    `json:"priority"`
-	Request   *TrainingJobRequest    `json:"request,omitempty"` // Full original request
-	Status    string                 `json:"status"`
-	Message   string                 `json:"message"`
-	CreatedAt time.Time              `json:"createdAt"`
-	UpdatedAt time.Time              `json:"updatedAt"`
+	ID               string              `json:"id"`
+	JobName          string              `json:"jobName"`
+	Namespace        string              `json:"namespace"`
+	Algorithm        string              `json:"algorithm"`
+	Priority         int                 `json:"priority"`
+	Request          *TrainingJobRequest `json:"request,omitempty"` // Full original request
+	Status           string              `json:"status,omitempty"`  // Deprecated: use JobStatus
+	Message          string              `json:"message,omitempty"` // Deprecated: use DeploymentStatus
+	JobStatus        string              `json:"jobStatus"`         // RayJob status: RUNNING, SUCCEEDED, FAILED
+	DeploymentStatus string              `json:"deploymentStatus"`  // Deployment status: Initializing, Running, Complete, Failed
+	CreatedAt        time.Time           `json:"createdAt"`
+	UpdatedAt        time.Time           `json:"updatedAt"`
+	StartTime        *time.Time          `json:"startTime,omitempty"` // Job start time
+	EndTime          *time.Time          `json:"endTime,omitempty"`   // Job end time
 }
 
 // JobStatus represents the status of a training job

@@ -6,7 +6,7 @@ import type { BackendTrainingJobRequest } from './api-service';
  */
 export function convertToBackendRequest(
   payload: JobPayload,
-  selectedClusters: string[] = []
+  namespace?: string
 ): BackendTrainingJobRequest {
   const algorithmName = payload.algorithm.algorithmName || 'xgboost';
   
@@ -100,8 +100,7 @@ export function convertToBackendRequest(
     },
     hyperparameters,
     customHyperparameters: payload.customHyperparameters || {},
-    targetClusters: selectedClusters.length > 0 ? selectedClusters : [],
-    namespace: 'default'
+    namespace: namespace || 'kubeflow-user-example-com'
   };
 }
 
@@ -117,23 +116,40 @@ export function convertFromBackendResponse(
   algorithm: string;
   createdAt: number;
   priority: number;
-  status: 'Pending' | 'Running' | 'Succeeded' | 'Failed';
+  status: 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Stopped';
+  jobStatus?: string;
+  deploymentStatus?: string;
+  startTime?: string;
+  endTime?: string;
 } {
   // Map backend status to frontend status
-  const statusMap: Record<string, 'Pending' | 'Running' | 'Succeeded' | 'Failed'> = {
+  const statusMap: Record<string, 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Stopped'> = {
     Pending: 'Pending',
     Running: 'Running',
     Succeeded: 'Succeeded',
     Failed: 'Failed',
+    Stopped: 'Stopped',
     Completed: 'Succeeded',
     Error: 'Failed',
+    RUNNING: 'Running',
+    SUCCEEDED: 'Succeeded',
+    FAILED: 'Failed',
+    STOPPED: 'Stopped',
+    PENDING: 'Pending',
   };
+  
+  // Use jobStatus if available, fallback to status
+  const backendStatus = response.jobStatus || response.status || 'Pending';
   
   return {
     id: response.id,
     algorithm: response.algorithm || response.jobName || 'unknown',
     createdAt: new Date(response.createdAt).getTime(),
     priority: response.priority || 100,
-    status: statusMap[response.status] || 'Pending',
+    status: statusMap[backendStatus] || 'Pending',
+    jobStatus: response.jobStatus,
+    deploymentStatus: response.deploymentStatus,
+    startTime: response.startTime,
+    endTime: response.endTime,
   };
 }

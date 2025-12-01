@@ -15,6 +15,7 @@ export type Channel = {
   bucket?: string;
   prefix?: string;
   uploadFileName?: string;
+  uploadedFile?: File; // Store the actual File object for upload
   channelType?: "train" | "validation" | "test";
   contentType?: "csv";
   csvColumns?: string[];
@@ -35,6 +36,15 @@ export type TrainingResources = {
   distributedTraining?: boolean;
 };
 
+export type OutputDataConfig = {
+  artifactUri: string;
+  configMode?: "default" | "custom";
+  storageProvider?: StorageProvider;
+  bucket?: string;
+  prefix?: string;
+  endpoint?: string;
+};
+
 export type TrainingJobForm = {
   jobName: string;
   priority: number;
@@ -46,7 +56,7 @@ export type TrainingJobForm = {
   resources: TrainingResources;
   stoppingCondition: { maxRuntimeSeconds: number };
   inputDataConfig: Channel[];
-  outputDataConfig: { artifactUri: string };
+  outputDataConfig: OutputDataConfig;
   hyperparameters: Record<string, HyperparameterValues>;
   customHyperparameters?: CustomHyperparameters;
 };
@@ -62,12 +72,12 @@ export type JobPayload = {
   resources: TrainingResources;
   stoppingCondition: { maxRuntimeSeconds: number };
   inputDataConfig: Channel[];
-  outputDataConfig: { artifactUri: string };
+  outputDataConfig: OutputDataConfig;
   hyperparameters: Record<string, HyperparameterValues>;
   customHyperparameters?: CustomHyperparameters;
 };
 
-export type JobStatus = "Pending" | "Running" | "Succeeded" | "Failed";
+export type JobStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "Stopped";
 
 export type StoredJob = {
   id: string;
@@ -76,4 +86,8 @@ export type StoredJob = {
   priority: number;
   status: JobStatus;
   pendingUntil?: number;
+  jobStatus?: string; // RayJob status: RUNNING, SUCCEEDED, FAILED, etc.
+  deploymentStatus?: string; // Deployment status: Initializing, Running, Complete, Failed
+  startTime?: string; // ISO timestamp
+  endTime?: string; // ISO timestamp
 };

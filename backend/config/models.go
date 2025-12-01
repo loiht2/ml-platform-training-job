@@ -14,7 +14,7 @@ type TrainingJob struct {
 	Algorithm      string `gorm:"index"` // algorithmName from request
 	Priority       int
 	RequestPayload string `gorm:"type:jsonb"` // Full request as JSON for reconstruction
-	TargetClusters string `gorm:"type:text"`  // JSON array of target cluster names
+	// Removed: TargetClusters - single-cluster deployment only
 	Status         string `gorm:"index"`
 	Message        string `gorm:"type:text"`
 	CreatedAt      time.Time

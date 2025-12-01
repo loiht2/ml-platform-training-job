@@ -14,9 +14,9 @@ import { getDefaultHyperparameters, getHyperparameterConfig, type Hyperparameter
 import { persistJob } from "@/lib/jobs-storage";
 import type { AlgorithmSource, Channel, JobPayload, StorageProvider, StoredJob, TrainingJobForm } from "@/types/training-job";
 import { CustomHyperparametersEditor } from "@/components/CustomHyperparametersEditor";
-import { ClusterSelector } from "@/components/ClusterSelector";
-import { jobsApi, APIError } from "@/lib/api-service";
+import { jobsApi, uploadApi, APIError } from "@/lib/api-service";
 import { convertToBackendRequest, convertFromBackendResponse } from "@/lib/backend-converter";
+import { getCurrentNamespace } from "@/lib/kubeflow-api";
 
 const builtinAlgorithms = [
   { id: "xgboost", name: "XGBoost" },
@@ -79,50 +79,82 @@ function deepClone<T>(x: T): T {
 }
 
 function formToPayload(form: TrainingJobForm): JobPayload {
-  return {
+  const payload: JobPayload = {
     jobName: form.jobName,
     priority: form.priority,
     algorithm: {
       source: form.algorithm.source,
-      algorithmName: form.algorithm.algorithmName,
-      imageUri: form.algorithm.imageUri,
+      ...(form.algorithm.algorithmName && { algorithmName: form.algorithm.algorithmName }),
+      ...(form.algorithm.imageUri && { imageUri: form.algorithm.imageUri }),
     },
     resources: deepClone(form.resources),
     stoppingCondition: deepClone(form.stoppingCondition),
     inputDataConfig: deepClone(form.inputDataConfig),
     outputDataConfig: deepClone(form.outputDataConfig),
     hyperparameters: deepClone(form.hyperparameters),
-    customHyperparameters: form.customHyperparameters ? deepClone(form.customHyperparameters) : undefined,
   };
+
+  // Only include customHyperparameters if it exists and has values
+  if (form.customHyperparameters && Object.keys(form.customHyperparameters).length > 0) {
+    payload.customHyperparameters = deepClone(form.customHyperparameters);
+  }
+
+  return payload;
 }
 
 function validateForm(form: TrainingJobForm) {
   const errors: string[] = [];
   if (!form.jobName || !JOB_NAME_REGEX.test(form.jobName)) {
-    errors.push("Job name is required and must match ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$");
+    errors.push("[Job Configuration] Job name is required and must match ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$");
   }
   if (!Number.isFinite(form.priority) || form.priority <= 0 || form.priority > 1000) {
-    errors.push("Priority must be greater than 0 and at most 1000.");
+    errors.push("[Job Configuration] Priority must be greater than 0 and at most 1000.");
   }
   const alg = form.algorithm;
-  if (alg.source === "builtin" && !alg.algorithmName) errors.push("Select a built-in algorithm.");
-  if (alg.source === "container" && !alg.imageUri) errors.push("Container image URI is required.");
-  if (!form.inputDataConfig?.length) errors.push("At least one input channel is required.");
+  if (alg.source === "builtin" && !alg.algorithmName) errors.push("[Algorithm] Select a built-in algorithm.");
+  if (alg.source === "container" && !alg.imageUri) errors.push("[Algorithm] Container image URI is required.");
+  if (!form.inputDataConfig?.length) errors.push("[Input Data] At least one input channel is required.");
   const hasTrain = form.inputDataConfig.some((c) => c.channelName === "train");
-  if (!hasTrain) errors.push("A 'train' channel is required.");
+  if (!hasTrain) errors.push("[Input Data] A 'train' channel is required.");
   form.inputDataConfig.forEach((c, idx) => {
     const sourceType = c.sourceType || "object-storage";
-    if (!c.channelName) errors.push(`Channel #${idx + 1}: name is required.`);
+    if (!c.channelName) errors.push(`[Input Data - Channel #${idx + 1}] Channel name is required.`);
     if (sourceType === "object-storage") {
-      if (!c.storageProvider) errors.push(`Channel '${c.channelName || idx + 1}': provider is required.`);
-      if (!c.bucket) errors.push(`Channel '${c.channelName || idx + 1}': bucket/container is required.`);
-      if (!c.prefix) errors.push(`Channel '${c.channelName || idx + 1}': prefix/path is required.`);
+      if (!c.storageProvider) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Storage provider is required.`);
+      if (!c.bucket) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Bucket/container is required.`);
+      if (!c.prefix) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Prefix/path is required.`);
     } else if (sourceType === "upload") {
-      if (!c.uploadFileName) errors.push(`Channel '${c.channelName || idx + 1}': upload file is required.`);
+      if (!c.uploadFileName) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Upload file is required. Please click 'Upload CSV File' button to select a file.`);
+      if (c.uploadFileName) {
+        if (!c.featureNames || c.featureNames.length === 0) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Feature name(s) is required when uploading a file.`);
+        if (!c.labelName) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Label name is required when uploading a file.`);
+      }
     }
   });
-  if (!form.outputDataConfig.artifactUri) errors.push("Output artifact URI is required.");
+  
+  // Validate output data configuration
+  const outputMode = form.outputDataConfig.configMode || "default";
+  if (outputMode === "custom") {
+    if (!form.outputDataConfig.storageProvider) errors.push("[Output Data Configuration] Storage provider is required.");
+    if (!form.outputDataConfig.bucket) errors.push("[Output Data Configuration] Bucket is required.");
+    if (!form.outputDataConfig.prefix) errors.push("[Output Data Configuration] Prefix/path is required.");
+  }
+  
   return errors;
+}
+
+// Helper to check if a field has errors
+function hasFieldError(errors: string[], fieldKey: string): boolean {
+  return errors.some(err => err.toLowerCase().includes(fieldKey.toLowerCase()));
+}
+
+// Helper to get error message for a specific field
+function getFieldError(errors: string[], fieldKey: string): string | null {
+  const error = errors.find(err => err.toLowerCase().includes(fieldKey.toLowerCase()));
+  if (!error) return null;
+  // Extract message after the section prefix
+  const match = error.match(/\[.*?\]\s*(.+)/);
+  return match ? match[1] : error;
 }
 
 type PersistResponse = { ok: true; filename: string } | { ok: false };
@@ -135,7 +167,7 @@ async function persistPayload(payload: JobPayload, job: StoredJob): Promise<Pers
   return { ok: false };
 }
 
-function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Channel) => void }) {
+function ChannelEditor({ value, onChange, hasError, bucketError, prefixError, featureError, labelError }: { value: Channel; onChange: (c: Channel) => void; hasError?: boolean; bucketError?: string; prefixError?: string; featureError?: string; labelError?: string }) {
   const sourceType = value.sourceType || "upload";
   const provider = value.storageProvider || DEFAULT_STORAGE_PROVIDER;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -164,6 +196,7 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
     if (!file) {
       updateChannel({ 
         uploadFileName: "", 
+        uploadedFile: undefined,
         csvColumns: [], 
         featureNames: [], 
         labelName: undefined 
@@ -179,7 +212,7 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
     }
 
     setUploadError(null);
-    updateChannel({ uploadFileName: file.name });
+    updateChannel({ uploadFileName: file.name, uploadedFile: file });
 
     if (value.contentType === "csv") {
       try {
@@ -190,6 +223,7 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
           const columns = headerLine.split(",").map(col => col.trim()).filter(col => col.length > 0);
           updateChannel({ 
             uploadFileName: file.name,
+            uploadedFile: file,
             csvColumns: columns,
             featureNames: [],
             labelName: undefined
@@ -217,7 +251,7 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
           <Input value={value.channelName} onChange={(e) => updateChannel({ channelName: e.target.value })} placeholder="train" className="flex-1" />
         </div>
         <div className="flex items-center gap-0">
-          <Label className="w-28 flex-shrink-0">Channel type</Label>
+          <Label className="w-25 flex-shrink-0">Channel type</Label>
           <Select 
             value={value.channelType || "train"} 
             onValueChange={(v) => updateChannel({ channelType: v as "train" | "validation" | "test" })}
@@ -261,7 +295,7 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
 
         {sourceType === "object-storage" ? (
           <div className="grid gap-3">
-            <div className="flex items-start gap-3">
+            <div className="flex items-center gap-2">
               <Label className="w-32 flex-shrink-0">Provider</Label>
               <Select value={provider} onValueChange={(v) => updateChannel({ storageProvider: v as StorageProvider })}>
                 <SelectTrigger className="flex-1"><SelectValue placeholder="Select provider" /></SelectTrigger>
@@ -272,14 +306,34 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid gap-8 sm:grid-cols-2">
+            <div className="grid gap-y-3 gap-x-30 md:grid-cols-2">
               <div className="flex items-center gap-2">
                 <Label className="w-32 flex-shrink-0">Bucket / Container</Label>
-                <Input value={value.bucket || ""} onChange={(e) => updateChannel({ bucket: e.target.value })} placeholder="storage://input" className="flex-1" />
+                <div className="flex-1">
+                  <Input 
+                    value={value.bucket || ""} 
+                    onChange={(e) => updateChannel({ bucket: e.target.value })} 
+                    placeholder="storage://input" 
+                    className={bucketError ? 'border-red-500' : ''}
+                  />
+                  {bucketError && (
+                    <p className="text-sm text-red-600 mt-1">{getFieldError([bucketError], 'bucket')}</p>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Label className="w-32 flex-shrink-0">Prefix / Path</Label>
-                <Input value={value.prefix || ""} onChange={(e) => updateChannel({ prefix: e.target.value })} placeholder="datasets/default/" className="flex-1" />
+              <div className="flex items-center gap-0">
+                <Label className="w-25 flex-shrink-0">Prefix / Path</Label>
+                <div className="flex-1">
+                  <Input 
+                    value={value.prefix || ""} 
+                    onChange={(e) => updateChannel({ prefix: e.target.value })} 
+                    placeholder="datasets/default/" 
+                    className={prefixError ? 'border-red-500' : ''}
+                  />
+                  {prefixError && (
+                    <p className="text-sm text-red-600 mt-1">{getFieldError([prefixError], 'prefix')}</p>
+                  )}
+                </div>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -292,19 +346,6 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
           </div>
         ) : (
           <div className="grid gap-3">
-            <div className="flex items-center gap-2">
-              <Label className="w-32 flex-shrink-0">Content type</Label>
-              <Select 
-                value={value.contentType || "csv"} 
-                onValueChange={(v) => updateChannel({ contentType: v as "csv" })}
-              >
-                <SelectTrigger className="flex-1"><SelectValue placeholder="Select content type" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="csv">CSV</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
             <div className="flex items-center gap-2">
               <Label className="w-32 flex-shrink-0 flex flex-col items-start leading-tight">
                 <span>Upload file</span>
@@ -320,7 +361,9 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
                 }}
                 className="hidden"
               />
-              <div className="flex flex-1 min-w-0 items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 shadow-sm">
+              <div className={`flex flex-1 min-w-0 items-center justify-between rounded-md border bg-white px-3 py-2 shadow-sm ${
+                hasError && !value.uploadFileName ? 'border-red-500' : 'border-slate-200'
+              }`}>
                 <span className={`text-sm truncate ${value.uploadFileName ? "text-slate-700" : "text-slate-400 italic"}`}>
                   {value.uploadFileName || "No file chosen"}
                 </span>
@@ -334,18 +377,21 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
                   {value.uploadFileName ? "Change" : "Browse"}
                 </Button>
               </div>
-              {uploadError && (
-                <p className="text-sm text-red-600">{uploadError}</p>
-              )}
             </div>
+            {uploadError && (
+              <p className="text-sm text-red-600 ml-36 mt-1">{uploadError}</p>
+            )}
+            {hasError && !value.uploadFileName && (
+              <p className="text-sm text-red-600 ml-36 mt-1">Upload file is required</p>
+            )}
 
             {availableColumns.length > 0 && (
               <>
                 <div className="flex items-start gap-4">
-                  <Label className="w-32 flex-shrink-0 pt-2">Feature name(s)</Label>
+                  <Label className="w-30 flex-shrink-0 pt-2">Feature name(s)</Label>
                   <div className="relative flex-1" ref={featureDropdownRef}>
                     <div
-                      className="flex min-h-9 w-full items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2 text-sm cursor-pointer"
+                      className={`flex min-h-9 w-full items-center justify-between rounded-md border ${featureError ? 'border-red-600' : 'border-slate-200'} bg-white px-3 py-2 text-sm cursor-pointer`}
                       onClick={() => setFeatureDropdownOpen(!featureDropdownOpen)}
                     >
                       <span className={selectedFeatures.length === 0 ? "text-slate-400" : ""}>
@@ -420,6 +466,9 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
                     )}
                   </div>
                 </div>
+                {featureError && (
+                  <p className="text-sm text-red-600 ml-36 mt-1">Feature name(s) is required</p>
+                )}
 
                 <div className="flex items-center gap-2">
                   <Label className="w-32 flex-shrink-0">Label name</Label>
@@ -428,7 +477,7 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
                     onValueChange={(col) => updateChannel({ labelName: col })}
                     disabled={availableForLabel.length === 0}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger className={labelError ? 'border-red-600' : ''}>
                       <SelectValue placeholder={availableForLabel.length === 0 ? "No columns available" : "Select label column"} />
                     </SelectTrigger>
                     <SelectContent>
@@ -438,6 +487,9 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
                     </SelectContent>
                   </Select>
                 </div>
+                {labelError && (
+                  <p className="text-sm text-red-600 ml-36 mt-1">Label name is required</p>
+                )}
               </>
             )}
           </div>
@@ -450,6 +502,8 @@ function ChannelEditor({ value, onChange }: { value: Channel; onChange: (c: Chan
 export default function CreateTrainingJobUI() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [currentNamespace, setCurrentNamespace] = useState<string>('');
+  
   const defaultAlgorithmId = builtinAlgorithms[0].id;
   const [form, setForm] = useState<TrainingJobForm>(() => ({
     jobName: generateJobName(),
@@ -477,23 +531,64 @@ export default function CreateTrainingJobUI() {
         labelName: undefined,
       },
     ],
-    outputDataConfig: { artifactUri: "storage://output/artifacts/" },
+    outputDataConfig: {
+      artifactUri: "",
+      configMode: "default",
+      storageProvider: "minio",
+      bucket: "",
+      prefix: "",
+      endpoint: "",
+    },
     hyperparameters: {
       [defaultAlgorithmId]: getDefaultHyperparameters(defaultAlgorithmId),
     },
     customHyperparameters: {},
   }));
 
+  const [checkpointEnabled, setCheckpointEnabled] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<null | { ok: boolean; message: string }>(null);
-  const [selectedClusters, setSelectedClusters] = useState<string[]>([]);
 
   const payload = useMemo(() => formToPayload(form), [form]);
   const errors = useMemo(() => validateForm(form), [form]);
 
+  // Fetch Kubeflow environment info on mount
+  useEffect(() => {
+    getCurrentNamespace().then(namespace => {
+      setCurrentNamespace(namespace);
+      console.log('Kubeflow namespace:', namespace);
+    }).catch(err => {
+      console.error('Failed to get Kubeflow environment info:', err);
+    });
+  }, []);
+
+  // Sync default output config when job name or namespace changes
+  useEffect(() => {
+    if (form.outputDataConfig.configMode === "default" && currentNamespace && form.jobName) {
+      setForm((prev) => ({
+        ...prev,
+        outputDataConfig: {
+          ...prev.outputDataConfig,
+          storageProvider: "minio",
+          bucket: currentNamespace,
+          prefix: `Output/${form.jobName}`,
+          endpoint: "",
+          artifactUri: `s3://${currentNamespace}/Output/${form.jobName}`,
+        },
+      }));
+    }
+  }, [form.outputDataConfig.configMode, currentNamespace, form.jobName]);
+
   const update = useCallback(<K extends keyof TrainingJobForm>(key: K, value: TrainingJobForm[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
+  const updateOutputDataConfig = useCallback((partial: Partial<typeof form.outputDataConfig>) => {
+    setForm((prev) => ({
+      ...prev,
+      outputDataConfig: { ...prev.outputDataConfig, ...partial },
+    }));
   }, []);
 
   const updateAlgorithm = useCallback((partial: Partial<TrainingJobForm["algorithm"]>) => {
@@ -637,8 +732,54 @@ export default function CreateTrainingJobUI() {
     try {
       const payload = formToPayload(form);
       
-      // Convert frontend payload to backend API format
-      const backendRequest = convertToBackendRequest(payload, selectedClusters);
+      // Get current namespace from Kubeflow (will use fallback if not available)
+      const namespace = currentNamespace || 'kubeflow-user-example-com';
+      
+      // Upload files to MinIO before creating the job
+      const uploadChannels = form.inputDataConfig.filter(
+        (channel) => channel.sourceType === "upload" && channel.uploadedFile
+      );
+      
+      if (uploadChannels.length > 0) {
+        console.log(`Uploading ${uploadChannels.length} file(s) to MinIO...`);
+        
+        for (const channel of uploadChannels) {
+          if (channel.uploadedFile) {
+            const objectKey = `training-data/${channel.channelName}/${channel.uploadedFile.name}`;
+            console.log(`Uploading file: ${channel.uploadedFile.name} to ${namespace}/${objectKey}`);
+            
+            try {
+              const uploadResult = await uploadApi.uploadFile(
+                channel.uploadedFile,
+                namespace,
+                objectKey
+              );
+              console.log(`File uploaded successfully: ${uploadResult.objectKey}`);
+              
+              // Update the channel to use object storage instead of upload
+              channel.sourceType = "object-storage";
+              channel.storageProvider = "minio";
+              channel.endpoint = uploadResult.endpoint;
+              channel.bucket = uploadResult.bucket;
+              channel.prefix = uploadResult.objectKey;
+              // Clear upload-specific fields
+              delete channel.uploadFileName;
+              delete channel.uploadedFile;
+              delete channel.csvColumns;
+              
+            } catch (uploadError) {
+              console.error(`Failed to upload file for channel ${channel.channelName}:`, uploadError);
+              const fileName = channel.uploadedFile?.name || 'unknown file';
+              throw new Error(`Failed to upload file ${fileName}: ${uploadError instanceof Error ? uploadError.message : 'Unknown error'}`);
+            }
+          }
+        }
+        
+        console.log("All files uploaded successfully");
+      }
+      
+      // Convert frontend payload to backend API format with namespace
+      const backendRequest = convertToBackendRequest(payload, namespace);
       
       // Submit to backend API
       const backendResponse = await jobsApi.create(backendRequest);
@@ -647,14 +788,11 @@ export default function CreateTrainingJobUI() {
       const job: StoredJob = convertFromBackendResponse(backendResponse);
       
       // Also save locally for offline access
-      const persistenceResult = await persistPayload(payload, job);
-      const localMessage = persistenceResult.ok
-        ? ` Also stored locally as ${persistenceResult.filename}.`
-        : "";
+      await persistPayload(payload, job);
       
       setSubmitResult({
         ok: true,
-        message: `Training job "${backendResponse.jobName}" created successfully! Job ID: ${backendResponse.id}.${localMessage}`,
+        message: `Training job "${backendResponse.jobName}" created successfully! Job ID: ${backendResponse.id}.`,
       });
       
       // Close dialog and navigate after a short delay
@@ -702,7 +840,9 @@ export default function CreateTrainingJobUI() {
               <h1 className="text-4xl font-bold bg-gradient-to-r from-slate-900 via-blue-900 to-indigo-900 bg-clip-text text-transparent tracking-tight">
                 Create Training Job
               </h1>
-              <p className="mt-3 text-lg text-slate-600 max-w-2xl">Configure and submit a new machine learning training job with customizable hyperparameters</p>
+              <p className="mt-3 text-lg text-slate-600 max-w-2xl">
+                Configure and submit a new machine learning training job with customizable hyperparameters
+              </p>
             </div>
             {errors.length === 0 ? (
               <div className="text-sm">
@@ -741,16 +881,18 @@ export default function CreateTrainingJobUI() {
               <CardContent className="pt-2">
                 <div className="flex items-center gap-2">
                   <Label className="text-sm font-semibold w-32 flex-shrink-0">Job Name</Label>
-                  <Input 
-                    value={form.jobName} 
-                    onChange={(e) => update("jobName", e.target.value)} 
-                    placeholder="train-2025…"
-                    className="flex-1"
-                  />
+                  <div className="flex-1">
+                    <Input 
+                      value={form.jobName} 
+                      onChange={(e) => update("jobName", e.target.value)} 
+                      placeholder="train-2025…"
+                      className={hasFieldError(errors, 'job name') ? 'border-red-500' : ''}
+                    />
+                    {hasFieldError(errors, 'job name') && (
+                      <p className="text-sm text-red-600 mt-1">{getFieldError(errors, 'job name')}</p>
+                    )}
+                  </div>
                 </div>
-                {!JOB_NAME_REGEX.test(form.jobName || "") && (
-                  <p className="text-xs text-red-600 mt-1 ml-36">Must be lowercase alphanumerics and dashes; max 63 chars; cannot start/end with a dash.</p>
-                )}
               </CardContent>
             </Card>
           </section>
@@ -785,39 +927,48 @@ export default function CreateTrainingJobUI() {
                   </label>
                   <label htmlFor="algorithm-source-container" className="flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 hover:border-purple-300 hover:bg-purple-50/50 transition-colors cursor-pointer">
                     <RadioGroupItem value="container" id="algorithm-source-container" />
-                    <span className="font-medium text-sm">Custom container</span>
+                    <span className="font-medium text-sm">Custom algorithm</span>
                   </label>
                 </RadioGroup>
               </div>
               {form.algorithm.source === "builtin" ? (
                 <div className="flex items-center gap-2">
                   <Label className="text-sm font-semibold w-32 flex-shrink-0">Built-in algorithm</Label>
-                  <Select
-                    value={form.algorithm.algorithmName}
-                    onValueChange={(value) => updateAlgorithm({ algorithmName: value, imageUri: undefined })}
-                  >
-                    <SelectTrigger className="flex-1">
-                      <SelectValue placeholder="Select algorithm" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {builtinAlgorithms.map((algo) => (
-                        <SelectItem key={algo.id} value={algo.id}>
-                          {algo.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <div className="flex-1">
+                    <Select
+                      value={form.algorithm.algorithmName}
+                      onValueChange={(value) => updateAlgorithm({ algorithmName: value, imageUri: undefined })}
+                    >
+                      <SelectTrigger className={hasFieldError(errors, 'algorithm') && form.algorithm.source === 'builtin' ? 'border-red-500' : ''}>
+                        <SelectValue placeholder="Select algorithm" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {builtinAlgorithms.map((algo) => (
+                          <SelectItem key={algo.id} value={algo.id}>
+                            {algo.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {hasFieldError(errors, 'algorithm') && form.algorithm.source === 'builtin' && (
+                      <p className="text-sm text-red-600 mt-1">{getFieldError(errors, 'algorithm')}</p>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <div className="flex items-start gap-4">
-                  <Label className="text-sm font-semibold w-32 flex-shrink-0 pt-2">Container image URI</Label>
+                  <Label className="text-sm font-semibold w-30 flex-shrink-0 pt-2">Container image URI</Label>
                   <div className="flex-1 space-y-1">
                     <Input
                       value={form.algorithm.imageUri || ""}
                       onChange={(e) => updateAlgorithm({ imageUri: e.target.value, algorithmName: undefined })}
                       placeholder="registry.example.com/ml/training:latest"
+                      className={hasFieldError(errors, 'image uri') && form.algorithm.source === 'container' ? 'border-red-500' : ''}
                     />
-                    <p className="text-xs text-slate-500">Provide a fully qualified container image URI.</p>
+                    {hasFieldError(errors, 'image uri') && form.algorithm.source === 'container' && (
+                      <p className="text-sm text-red-600 mt-1">{getFieldError(errors, 'image uri')}</p>
+                    )}
+                    <p className="text-xs text-slate-500">Provide a fully qualified container image URI for your custom algorithm.</p>
                   </div>
                 </div>
               )}
@@ -983,7 +1134,16 @@ export default function CreateTrainingJobUI() {
               {form.inputDataConfig.length === 0 && (
                 <p className="text-sm text-slate-600 py-8 text-center bg-gradient-to-br from-slate-50 to-indigo-50 rounded-lg border border-dashed border-indigo-200">No channels configured yet. Add at least one to continue.</p>
               )}
-              {form.inputDataConfig.map((channel, idx) => (
+              {form.inputDataConfig.map((channel, idx) => {
+                const channelErrors = errors.filter(err => 
+                  err.includes(`#${idx + 1}`) || (channel.channelName && err.includes(`'${channel.channelName}`))
+                );
+                const uploadFileError = channelErrors.find(err => err.includes('Upload file'));
+                const bucketError = channelErrors.find(err => err.includes('Bucket'));
+                const prefixError = channelErrors.find(err => err.includes('Prefix'));
+                const featureError = channelErrors.find(err => err.includes('Feature name'));
+                const labelError = channelErrors.find(err => err.includes('Label name'));
+                return (
                 <div key={channel.id} className="rounded-lg border border-indigo-200/50 bg-gradient-to-br from-slate-50 to-indigo-50/40 p-3 hover:border-indigo-300 transition-colors">
                   <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                     <div>
@@ -1038,6 +1198,11 @@ export default function CreateTrainingJobUI() {
                   <div className="bg-white rounded-md p-3">
                     <ChannelEditor
                       value={channel}
+                      hasError={uploadFileError !== undefined}
+                      bucketError={bucketError}
+                      prefixError={prefixError}
+                      featureError={featureError}
+                      labelError={labelError}
                       onChange={(next) => {
                         const nextChannels = [...form.inputDataConfig];
                         nextChannels[idx] = next;
@@ -1046,7 +1211,8 @@ export default function CreateTrainingJobUI() {
                     />
                   </div>
                 </div>
-              ))}
+              );
+              })}
               <div className="flex flex-wrap gap-2 pt-1">
                 <Button type="button" onClick={() => addChannel({ channelName: `channel-${form.inputDataConfig.length + 1}`, channelType: "train" })} className="bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white font-semibold shadow-sm hover:shadow-md transition-all">
                   <Plus className="mr-2 h-4 w-4" /> Add channel
@@ -1100,19 +1266,15 @@ export default function CreateTrainingJobUI() {
 
           <Card className="shadow-md border-rose-100 bg-gradient-to-br from-white to-rose-50/30 hover:shadow-lg transition-shadow mt-4">
             <CardContent className="pt-2">
-              <h3 className="text-base font-semibold text-slate-900 mb-2">Checkpoint config – optional</h3>
-              <p className="text-sm text-slate-600 mb-3">The algorithm is responsible for periodically generating checkpoints.</p>
-              
-              <div className="flex items-start gap-4">
-                <Label className="text-sm font-semibold w-32 flex-shrink-0 pt-2">Output path</Label>
+              <div className="flex items-center justify-between">
                 <div className="flex-1">
-                  <Input
-                    value={form.outputDataConfig.artifactUri}
-                    onChange={(e) => update("outputDataConfig", { artifactUri: e.target.value })}
-                    placeholder="storage://output/artifacts/"
-                  />
-                  <p className="text-sm text-slate-500 mt-2">Provide a URI for an object store or shared filesystem where the job can write results.</p>
+                  <h3 className="text-base font-semibold text-slate-900 mb-1">Checkpoint config - optional</h3>
+                  <p className="text-sm text-slate-600">The algorithm is responsible for periodically generating checkpoints.</p>
                 </div>
+                <Switch
+                  checked={checkpointEnabled}
+                  onCheckedChange={setCheckpointEnabled}
+                />
               </div>
             </CardContent>
           </Card>
@@ -1122,15 +1284,86 @@ export default function CreateTrainingJobUI() {
               <h3 className="text-base font-semibold text-slate-900 mb-2">Output data configuration</h3>
               <p className="text-sm text-slate-600 mb-3">Training outputs such as logs and metrics are stored, enabling visualization in tools like TensorBoard.</p>
               
-              <div className="flex items-start gap-4">
-                <Label className="text-sm font-semibold w-32 flex-shrink-0 pt-2">Output data path</Label>
-                <div className="flex-1">
-                  <Input
-                    value={form.outputDataConfig.artifactUri}
-                    onChange={(e) => update("outputDataConfig", { artifactUri: e.target.value })}
-                    placeholder="storage://output/logs/"
-                  />
-                  <p className="text-sm text-slate-500 mt-2">Specify where training logs and metrics should be stored for analysis and visualization.</p>
+              <div className="grid gap-3">
+                <div className="flex items-center gap-2">
+                  <Label className="w-32 shrink-0">Configuration</Label>
+                  <RadioGroup
+                    value={form.outputDataConfig.configMode || "default"}
+                    onValueChange={(v) => {
+                      const mode = v as "default" | "custom";
+                      if (mode === "default") {
+                        updateOutputDataConfig({
+                          configMode: mode,
+                          storageProvider: "minio",
+                          bucket: currentNamespace,
+                          prefix: `Output/${form.jobName}`,
+                          endpoint: "",
+                          artifactUri: `s3://${currentNamespace}/Output/${form.jobName}`,
+                        });
+                      } else {
+                        updateOutputDataConfig({
+                          configMode: mode,
+                          storageProvider: "minio",
+                          bucket: "",
+                          prefix: "",
+                          endpoint: "",
+                          artifactUri: "",
+                        });
+                      }
+                    }}
+                    className="flex flex-wrap gap-2 flex-1"
+                  >
+                    <label htmlFor="output-config-default" className="flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer hover:bg-slate-50">
+                      <RadioGroupItem value="default" id="output-config-default" />
+                      <span className="font-normal">Default</span>
+                    </label>
+                    <label htmlFor="output-config-custom" className="flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer hover:bg-slate-50">
+                      <RadioGroupItem value="custom" id="output-config-custom" />
+                      <span className="font-normal">Custom</span>
+                    </label>
+                  </RadioGroup>
+                </div>
+
+                <div className="grid gap-3">
+                  <div className="flex items-center gap-2">
+                    <Label className="w-32 shrink-0">Provider</Label>
+                    <Select 
+                      value={form.outputDataConfig.storageProvider || "minio"} 
+                      onValueChange={(v) => updateOutputDataConfig({ storageProvider: v as StorageProvider })}
+                      disabled={form.outputDataConfig.configMode === "default"}
+                    >
+                      <SelectTrigger className="flex-1">
+                        <SelectValue placeholder="Select provider" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {storageProviders.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Label className="w-32 shrink-0">Bucket</Label>
+                    <Input
+                      value={form.outputDataConfig.bucket || ""}
+                      onChange={(e) => updateOutputDataConfig({ bucket: e.target.value })}
+                      placeholder="my-bucket"
+                      disabled={form.outputDataConfig.configMode === "default"}
+                      className={`flex-1 ${form.outputDataConfig.configMode === "default" ? 'bg-slate-50 text-slate-700' : ''}`}
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Label className="w-32 shrink-0">Prefix / Path</Label>
+                    <Input
+                      value={form.outputDataConfig.prefix || ""}
+                      onChange={(e) => updateOutputDataConfig({ prefix: e.target.value })}
+                      placeholder="output/path"
+                      disabled={form.outputDataConfig.configMode === "default"}
+                      className={`flex-1 ${form.outputDataConfig.configMode === "default" ? 'bg-slate-50 text-slate-700' : ''}`}
+                    />
+                  </div>
                 </div>
               </div>
             </CardContent>
@@ -1138,22 +1371,6 @@ export default function CreateTrainingJobUI() {
           </section>
 
           {/* Section 5: Cluster Selection */}
-          {false && (<section>
-            <div className="mb-2">
-              <h2 className="text-xl font-bold text-slate-900">Target Clusters</h2>
-              <p className="mt-1 text-sm text-slate-600">Select which Karmada member clusters should run this job</p>
-            </div>
-            
-            <Card className="shadow-md border-purple-100 bg-gradient-to-br from-white to-purple-50/30 hover:shadow-lg transition-shadow">
-              <CardContent className="pt-2">
-                <ClusterSelector
-                  selectedClusters={selectedClusters}
-                  onSelectionChange={setSelectedClusters}
-                  disabled={submitting}
-                />
-              </CardContent>
-            </Card>
-          </section>)}
         </div>
 
         {/* Submit Section */}
@@ -1162,15 +1379,38 @@ export default function CreateTrainingJobUI() {
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div className="flex-1">
               {errors.length > 0 ? (
-                <div className="flex items-start gap-3">
-                  <div className="h-10 w-10 rounded-full bg-gradient-to-br from-amber-100 to-orange-100 flex items-center justify-center flex-shrink-0 shadow-sm">
-                    <span className="text-amber-600 text-xl font-bold">!</span>
-                  </div>
-                  <div>
-                    <p className="font-semibold text-slate-900">
-                      {errors.length} validation issue{errors.length === 1 ? "" : "s"} found
-                    </p>
-                    <p className="text-sm text-slate-600">Please resolve all issues before submitting</p>
+                <div className="space-y-2">
+                  <div className="flex items-start gap-3">
+                    <div className="h-10 w-10 rounded-full bg-gradient-to-br from-amber-100 to-orange-100 flex items-center justify-center flex-shrink-0 shadow-sm">
+                      <span className="text-amber-600 text-xl font-bold">!</span>
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-semibold text-slate-900">
+                        {errors.length} validation issue{errors.length === 1 ? "" : "s"} found
+                      </p>
+                      <ul className="mt-2 space-y-1">
+                        {errors.map((error, idx) => {
+                          const match = error.match(/^\[([^\]]+)\]\s*(.+)$/);
+                          if (match) {
+                            const [, section, message] = match;
+                            return (
+                              <li key={idx} className="text-sm text-red-600 flex items-start gap-2">
+                                <span className="text-red-500 mt-0.5">•</span>
+                                <span>
+                                  <span className="font-semibold">{section}:</span> {message}
+                                </span>
+                              </li>
+                            );
+                          }
+                          return (
+                            <li key={idx} className="text-sm text-red-600 flex items-start gap-2">
+                              <span className="text-red-500 mt-0.5">•</span>
+                              <span>{error}</span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
                   </div>
                 </div>
               ) : (
@@ -1180,27 +1420,35 @@ export default function CreateTrainingJobUI() {
                   </div>
                   <div>
                     <p className="font-semibold text-slate-900">Configuration complete</p>
-                    <p className="text-sm text-slate-600">
-                      <span className="font-medium">{form.resources.instanceResources.cpuCores}</span> CPU ·{" "}
-                      <span className="font-medium">{form.resources.instanceResources.memoryGiB}</span> GiB RAM ·{" "}
-                      <span className="font-medium">{form.resources.instanceResources.gpuCount}</span> GPU ·{" "}
-                      <span className="font-medium">{form.resources.instanceCount}</span> instance{form.resources.instanceCount > 1 ? "s" : ""} ·{" "}
-                      <span className="font-medium">{form.resources.volumeSizeGB}</span> GiB storage
-                    </p>
+                    <p className="text-sm text-slate-600">Ready to submit training job</p>
                   </div>
                 </div>
               )}
             </div>
             <div className="flex gap-3">
+              <Button 
+                onClick={submit}
+                disabled={errors.length > 0 || submitting} 
+                size="lg"
+                className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold px-8"
+              >
+                {submitting ? "Submitting..." : "Submit"}
+              </Button>
+              {submitResult && (
+                <div className={`flex items-center gap-2 px-4 py-2 rounded-lg ${submitResult.ok ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
+                  <span className="text-sm font-medium">{submitResult.message}</span>
+                </div>
+              )}
               <Dialog open={reviewOpen} onOpenChange={setReviewOpen}>
                 <DialogTrigger asChild>
                   <Button 
+                    variant="outline"
                     disabled={errors.length > 0} 
                     size="lg"
-                    className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold px-8"
+                    className="border-slate-300 hover:bg-slate-100"
                   >
                     <FileJson2 className="mr-2 h-5 w-5" /> 
-                    Review &amp; Submit
+                    Review JSON
                   </Button>
                 </DialogTrigger>
                 <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">

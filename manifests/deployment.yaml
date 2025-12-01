@@ -1,0 +1,161 @@
+---
+# Backend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-platform-backend
+  namespace: kubeflow
+  labels:
+    app: ml-platform
+    component: backend
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: ml-platform
+    component: backend
+---
+# Backend Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-platform-backend
+  namespace: kubeflow
+  labels:
+    app: ml-platform
+    component: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ml-platform
+      component: backend
+  template:
+    metadata:
+      labels:
+        app: ml-platform
+        component: backend
+      annotations:
+        sidecar.istio.io/inject: "true"
+    spec:
+      serviceAccountName: ml-platform-backend
+      containers:
+        - name: backend
+          image: loihoangthanh1411/ml-platform-backend:kubeflow-v1.5
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30  # Allow 150 seconds for startup
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+---
+# Frontend Service (following Kubeflow web-app-service naming convention)
+apiVersion: v1
+kind: Service
+metadata:
+  name: training-job-web-app-service
+  namespace: kubeflow
+  labels:
+    app: ml-platform
+    component: frontend
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: ml-platform
+    component: frontend
+---
+# Frontend Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-platform-frontend
+  namespace: kubeflow
+  labels:
+    app: ml-platform
+    component: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ml-platform
+      component: frontend
+  template:
+    metadata:
+      labels:
+        app: ml-platform
+        component: frontend
+      annotations:
+        sidecar.istio.io/inject: "true"
+    spec:
+      serviceAccountName: ml-platform-frontend
+      containers:
+        - name: frontend
+          image: loihoangthanh1411/ml-platform-frontend:kubeflow-v1.12
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5

@@ -36,7 +36,6 @@ export interface BackendTrainingJobRequest {
   };
   hyperparameters?: any; // Can contain xgboost, tensorflow, etc.
   customHyperparameters?: Record<string, any>;
-  targetClusters?: string[];
   namespace?: string;
   entrypoint?: string;
   headImage?: string;
@@ -67,17 +66,6 @@ export interface JobStatus {
   startTime?: string;
   completionTime?: string;
   clusterDistribution?: Record<string, number>;
-}
-
-export interface ClusterInfo {
-  name: string;
-  ready: boolean;
-  region?: string;
-  zone?: string;
-}
-
-export interface ClustersResponse {
-  clusters: ClusterInfo[];
 }
 
 class APIError extends Error {
@@ -187,40 +175,74 @@ export const jobsApi = {
   },
 };
 
-export const clustersApi = {
-  /**
-   * List all member clusters
-   */
-  list: async (): Promise<ClustersResponse> => {
-    return fetchAPI<ClustersResponse>('/proxy/clusters');
-  },
-
-  /**
-   * Get resources from a specific cluster
-   */
-  getResources: async (
-    cluster: string,
-    namespace: string = 'default',
-    type: string = 'pods'
-  ): Promise<{
-    cluster: string;
-    namespace: string;
-    type: string;
-    count: number;
-    resources: unknown[];
-  }> => {
-    return fetchAPI(
-      `/proxy/clusters/${cluster}/resources?namespace=${namespace}&type=${type}`
-    );
-  },
-};
-
 export const healthApi = {
   /**
    * Check backend health
    */
   check: async (): Promise<{ status: string }> => {
     return fetchAPI<{ status: string }>('/health', {}, );
+  },
+};
+
+export const uploadApi = {
+  /**
+   * Upload a file to MinIO
+   * @param file - The file to upload
+   * @param namespace - Target namespace (bucket name)
+   * @param objectKey - Optional object key (path in bucket), defaults to filename
+   */
+  uploadFile: async (
+    file: File,
+    namespace: string,
+    objectKey?: string
+  ): Promise<{
+    message: string;
+    bucket: string;
+    objectKey: string;
+    size: number;
+    etag: string;
+    endpoint: string;
+  }> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (objectKey) {
+      formData.append('objectKey', objectKey);
+    }
+
+    const url = `${API_BASE_URL}/upload?namespace=${encodeURIComponent(namespace)}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+        // Don't set Content-Type header - browser will set it with boundary for multipart/form-data
+      });
+
+      if (!response.ok) {
+        let errorData: unknown;
+        try {
+          errorData = await response.json();
+        } catch {
+          errorData = await response.text();
+        }
+        throw new APIError(
+          `Upload failed: ${response.statusText}`,
+          response.status,
+          errorData
+        );
+      }
+
+      return await response.json();
+    } catch (error) {
+      if (error instanceof APIError) {
+        throw error;
+      }
+      throw new APIError(
+        `Network error during upload: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        undefined,
+        error
+      );
+    }
   },
 };
 

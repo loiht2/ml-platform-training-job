@@ -1,6 +1,7 @@
 package converter
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -97,132 +98,146 @@ func (c *Converter) ConvertToRayJobV2(req *models.TrainingJobRequest, jobID stri
 	return rayJob, nil
 }
 
-// buildRuntimeEnvYAML creates the runtime environment YAML with all environment variables
+// buildRuntimeEnvYAML creates the runtime environment YAML with TUNING_CONFIG as JSON
 func (c *Converter) buildRuntimeEnvYAML(req *models.TrainingJobRequest) string {
-	var sb strings.Builder
+	// Build the complete configuration as a map
+	config := c.buildTrainingConfig(req)
 	
-	sb.WriteString("env_vars:\n")
-	sb.WriteString("  # ==== TRAINING CONTROL ====\n")
-	
-	// NUM_WORKER
-	sb.WriteString(fmt.Sprintf("  NUM_WORKER: \"%d\"\n", req.Resources.InstanceCount))
-	
-	// USE_GPU
-	useGPU := "false"
-	if req.Resources.InstanceResources.GPUCount > 0 {
-		useGPU = "true"
+	// Convert to JSON
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		// Fallback to empty config if marshal fails
+		configJSON = []byte("{}")
 	}
-	sb.WriteString(fmt.Sprintf("  USE_GPU: \"%s\"\n", useGPU))
 	
-	// LABEL_COLUMN
-	sb.WriteString(fmt.Sprintf("  LABEL_COLUMN: \"%s\"\n", DefaultLabelColumn))
+	// Escape the JSON string for YAML (indent for readability)
+	var jsonStr strings.Builder
+	jsonStr.WriteString("|\n")
 	
-	// RUN_NAME
-	sb.WriteString(fmt.Sprintf("  RUN_NAME: \"%s\"\n", req.JobName))
+	// Pretty print the JSON with indentation
+	var prettyJSON map[string]interface{}
+	json.Unmarshal(configJSON, &prettyJSON)
+	prettyBytes, _ := json.MarshalIndent(prettyJSON, "        ", "  ")
 	
-	// STORAGE_PATH
-	storagePath := c.deriveStoragePath(req.OutputDataConfig.ArtifactURI)
-	sb.WriteString(fmt.Sprintf("  STORAGE_PATH: \"%s\"\n", storagePath))
+	// Add each line with proper indentation
+	lines := strings.Split(string(prettyBytes), "\n")
+	for _, line := range lines {
+		jsonStr.WriteString("        ")
+		jsonStr.WriteString(line)
+		jsonStr.WriteString("\n")
+	}
+	
+	// Build YAML with TUNING_CONFIG
+	return fmt.Sprintf("env_vars:\n  TUNING_CONFIG: %s", jsonStr.String())
+}
+
+// buildTrainingConfig creates the complete training configuration map
+func (c *Converter) buildTrainingConfig(req *models.TrainingJobRequest) map[string]interface{} {
+	config := make(map[string]interface{})
+	
+	// Training control
+	config["num_worker"] = req.Resources.InstanceCount
+	config["use_gpu"] = req.Resources.InstanceResources.GPUCount > 0
+	config["label_column"] = DefaultLabelColumn
+	config["run_name"] = req.JobName
+	config["storage_path"] = c.deriveStoragePath(req.OutputDataConfig.ArtifactURI)
 	
 	// S3/MinIO configuration
 	if len(req.InputDataConfig) > 0 {
 		inputConfig := req.InputDataConfig[0]
-		sb.WriteString("\n  # ==== S3/MinIO Configuration ====\n")
-		sb.WriteString(fmt.Sprintf("  S3_ENDPOINT: \"%s\"\n", inputConfig.Endpoint))
-		sb.WriteString(fmt.Sprintf("  S3_ACCESS_KEY: \"%s\"\n", DefaultS3AccessKey))
-		sb.WriteString(fmt.Sprintf("  S3_SECRET_KEY: \"%s\"\n", DefaultS3SecretKey))
-		sb.WriteString(fmt.Sprintf("  S3_REGION: \"%s\"\n", DefaultS3Region))
-		sb.WriteString(fmt.Sprintf("  S3_BUCKET: \"%s\"\n", inputConfig.Bucket))
-		sb.WriteString(fmt.Sprintf("  S3_TRAIN_KEY: \"%s\"\n", inputConfig.Prefix))
+		s3Config := map[string]interface{}{
+			"endpoint":   inputConfig.Endpoint,
+			"access_key": DefaultS3AccessKey,
+			"secret_key": DefaultS3SecretKey,
+			"region":     DefaultS3Region,
+			"bucket":     inputConfig.Bucket,
+			"train_key":  inputConfig.Prefix,
+		}
 		
 		// If there's a second channel for validation
 		if len(req.InputDataConfig) > 1 {
-			sb.WriteString(fmt.Sprintf("  S3_VAL_KEY: \"%s\"\n", req.InputDataConfig[1].Prefix))
+			s3Config["val_key"] = req.InputDataConfig[1].Prefix
 		}
+		
+		config["s3"] = s3Config
 	}
 	
-	// XGBoost hyperparameters
+	// Algorithm-specific hyperparameters
 	if req.Hyperparameters.XGBoost != nil {
-		sb.WriteString("\n  # ==== XGBoost Hyperparameters ====\n")
-		c.appendXGBoostHyperparameters(&sb, req.Hyperparameters.XGBoost)
+		config["xgboost"] = c.buildXGBoostConfig(req.Hyperparameters.XGBoost)
 	}
 	
 	// Custom hyperparameters
 	if len(req.CustomHyperparameters) > 0 {
-		sb.WriteString("\n  # ==== Custom Hyperparameters ====\n")
-		for key, value := range req.CustomHyperparameters {
-			sb.WriteString(fmt.Sprintf("  %s: \"%v\"\n", strings.ToUpper(key), value))
-		}
+		config["custom"] = req.CustomHyperparameters
 	}
 	
-	return sb.String()
+	return config
 }
 
-// appendXGBoostHyperparameters adds all XGBoost parameters to the string builder
-func (c *Converter) appendXGBoostHyperparameters(sb *strings.Builder, xgb *models.XGBoostHyperparameters) {
-	// NUM_BOOST_ROUND
-	sb.WriteString(fmt.Sprintf("  NUM_BOOST_ROUND: \"%d\"\n", xgb.NumRound))
+// buildXGBoostConfig creates the XGBoost configuration map
+func (c *Converter) buildXGBoostConfig(xgb *models.XGBoostHyperparameters) map[string]interface{} {
+	config := make(map[string]interface{})
 	
-	// EARLY_STOPPING_ROUNDS
+	// Training parameters
+	config["num_boost_round"] = xgb.NumRound
 	if xgb.EarlyStoppingRounds != nil {
-		sb.WriteString(fmt.Sprintf("  EARLY_STOPPING_ROUNDS: \"%d\"\n", *xgb.EarlyStoppingRounds))
-	} else {
-		sb.WriteString("  EARLY_STOPPING_ROUNDS: \"\"\n")
+		config["early_stopping_rounds"] = *xgb.EarlyStoppingRounds
 	}
-	
-	// CSV_WEIGHT
-	sb.WriteString(fmt.Sprintf("  CSV_WEIGHT: \"%d\"\n", xgb.CSVWeights))
+	config["csv_weight"] = xgb.CSVWeights
 	
 	// Basic parameters
-	sb.WriteString(fmt.Sprintf("  BOOSTER: \"%s\"\n", xgb.Booster))
-	sb.WriteString(fmt.Sprintf("  VERBOSITY: \"%d\"\n", xgb.Verbosity))
+	config["booster"] = xgb.Booster
+	config["verbosity"] = xgb.Verbosity
 	
 	// Learning parameters
-	sb.WriteString(fmt.Sprintf("  ETA: \"%.10g\"\n", xgb.Eta))
-	sb.WriteString(fmt.Sprintf("  GAMMA: \"%.10g\"\n", xgb.Gamma))
-	sb.WriteString(fmt.Sprintf("  MAX_DEPTH: \"%d\"\n", xgb.MaxDepth))
-	sb.WriteString(fmt.Sprintf("  MIN_CHILD_WEIGHT: \"%.10g\"\n", xgb.MinChildWeight))
-	sb.WriteString(fmt.Sprintf("  MAX_DELTA_STEP: \"%.10g\"\n", xgb.MaxDeltaStep))
-	sb.WriteString(fmt.Sprintf("  SUBSAMPLE: \"%.10g\"\n", xgb.Subsample))
-	sb.WriteString(fmt.Sprintf("  SAMPLING_METHOD: \"%s\"\n", xgb.SamplingMethod))
-	sb.WriteString(fmt.Sprintf("  COLSAMPLE_BYTREE: \"%.10g\"\n", xgb.ColsampleBytree))
-	sb.WriteString(fmt.Sprintf("  COLSAMPLE_BYLEVEL: \"%.10g\"\n", xgb.ColsampleBylevel))
-	sb.WriteString(fmt.Sprintf("  COLSAMPLE_BYNODE: \"%.10g\"\n", xgb.ColsampleBynode))
-	sb.WriteString(fmt.Sprintf("  LAMBDA: \"%.10g\"\n", xgb.Lambda))
-	sb.WriteString(fmt.Sprintf("  ALPHA: \"%.10g\"\n", xgb.Alpha))
-	sb.WriteString(fmt.Sprintf("  TREE_METHOD: \"%s\"\n", xgb.TreeMethod))
-	sb.WriteString(fmt.Sprintf("  SKETCH_EPS: \"%.10g\"\n", xgb.SketchEps))
-	sb.WriteString(fmt.Sprintf("  SCALE_POS_WEIGHT: \"%.10g\"\n", xgb.ScalePosWeight))
+	config["eta"] = xgb.Eta
+	config["gamma"] = xgb.Gamma
+	config["max_depth"] = xgb.MaxDepth
+	config["min_child_weight"] = xgb.MinChildWeight
+	config["max_delta_step"] = xgb.MaxDeltaStep
+	config["subsample"] = xgb.Subsample
+	config["sampling_method"] = xgb.SamplingMethod
+	config["colsample_bytree"] = xgb.ColsampleBytree
+	config["colsample_bylevel"] = xgb.ColsampleBylevel
+	config["colsample_bynode"] = xgb.ColsampleBynode
+	config["lambda"] = xgb.Lambda
+	config["alpha"] = xgb.Alpha
+	config["tree_method"] = xgb.TreeMethod
+	config["sketch_eps"] = xgb.SketchEps
+	config["scale_pos_weight"] = xgb.ScalePosWeight
 	
-	// Updater (only if not "auto" to keep it clean)
+	// Updater (only if not "auto")
 	if xgb.Updater != "" && xgb.Updater != "auto" {
-		sb.WriteString(fmt.Sprintf("  UPDATER: \"%s\"\n", xgb.Updater))
+		config["updater"] = xgb.Updater
 	}
 	
 	// Advanced parameters
-	sb.WriteString(fmt.Sprintf("  DSPLIT: \"%s\"\n", xgb.Dsplit))
-	sb.WriteString(fmt.Sprintf("  REFRESH_LEAF: \"%d\"\n", xgb.RefreshLeaf))
-	sb.WriteString(fmt.Sprintf("  PROCESS_TYPE: \"%s\"\n", xgb.ProcessType))
-	sb.WriteString(fmt.Sprintf("  GROW_POLICY: \"%s\"\n", xgb.GrowPolicy))
-	sb.WriteString(fmt.Sprintf("  MAX_LEAVES: \"%d\"\n", xgb.MaxLeaves))
-	sb.WriteString(fmt.Sprintf("  MAX_BIN: \"%d\"\n", xgb.MaxBin))
-	sb.WriteString(fmt.Sprintf("  NUM_PARALLEL_TREE: \"%d\"\n", xgb.NumParallelTree))
-	sb.WriteString(fmt.Sprintf("  SAMPLE_TYPE: \"%s\"\n", xgb.SampleType))
-	sb.WriteString(fmt.Sprintf("  NORMALIZE_TYPE: \"%s\"\n", xgb.NormalizeType))
-	sb.WriteString(fmt.Sprintf("  RATE_DROP: \"%.10g\"\n", xgb.RateDrop))
-	sb.WriteString(fmt.Sprintf("  ONE_DROP: \"%d\"\n", xgb.OneDrop))
-	sb.WriteString(fmt.Sprintf("  SKIP_DROP: \"%.10g\"\n", xgb.SkipDrop))
-	sb.WriteString(fmt.Sprintf("  LAMBDA_BIAS: \"%.10g\"\n", xgb.LambdaBias))
-	sb.WriteString(fmt.Sprintf("  TWEEDIE_VARIANCE_POWER: \"%.10g\"\n", xgb.TweedieVariancePower))
+	config["dsplit"] = xgb.Dsplit
+	config["refresh_leaf"] = xgb.RefreshLeaf
+	config["process_type"] = xgb.ProcessType
+	config["grow_policy"] = xgb.GrowPolicy
+	config["max_leaves"] = xgb.MaxLeaves
+	config["max_bin"] = xgb.MaxBin
+	config["num_parallel_tree"] = xgb.NumParallelTree
+	config["sample_type"] = xgb.SampleType
+	config["normalize_type"] = xgb.NormalizeType
+	config["rate_drop"] = xgb.RateDrop
+	config["one_drop"] = xgb.OneDrop
+	config["skip_drop"] = xgb.SkipDrop
+	config["lambda_bias"] = xgb.LambdaBias
+	config["tweedie_variance_power"] = xgb.TweedieVariancePower
 	
 	// Objective and metrics
-	sb.WriteString(fmt.Sprintf("  OBJECTIVE: \"%s\"\n", xgb.Objective))
-	sb.WriteString(fmt.Sprintf("  BASE_SCORE: \"%.10g\"\n", xgb.BaseScore))
+	config["objective"] = xgb.Objective
+	config["base_score"] = xgb.BaseScore
 	
-	// EVAL_METRIC - join array with commas
+	// Eval metric
 	if len(xgb.EvalMetric) > 0 {
-		sb.WriteString(fmt.Sprintf("  EVAL_METRIC: \"%s\"\n", strings.Join(xgb.EvalMetric, ",")))
+		config["eval_metric"] = xgb.EvalMetric
 	}
+	
+	return config
 }
 
 // deriveStoragePath determines the storage path from output config
@@ -415,7 +430,7 @@ func (c *Converter) CreatePVC(req *models.TrainingJobRequest, jobID string) *cor
 			AccessModes: []corev1.PersistentVolumeAccessMode{
 				corev1.ReadWriteMany,
 			},
-			Resources: corev1.ResourceRequirements{
+			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceStorage: resource.MustParse(storageSize),
 				},

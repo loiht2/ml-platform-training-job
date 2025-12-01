@@ -87,7 +87,7 @@ export function CustomHyperparametersEditor({ value, onChange }: CustomHyperpara
         <div>
           <h3 className="text-lg font-semibold text-slate-900">Custom Hyperparameters</h3>
           <p className="text-sm text-slate-600 mt-1">
-            Define key-value pairs for your custom container
+            Define key-value pairs for your custom algorithm
           </p>
         </div>
         {hasParams && (
@@ -198,9 +198,6 @@ export function CustomHyperparametersEditor({ value, onChange }: CustomHyperpara
             Add Parameter
           </Button>
         </div>
-        <p className="text-xs text-slate-500">
-          Values are automatically typed: numbers (0.001), booleans (true/false), or strings
-        </p>
       </div>
     </div>
   );

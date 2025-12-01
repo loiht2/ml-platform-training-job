@@ -3,144 +3,98 @@ package config
 import (
 	"fmt"
 	"log"
-	"time"
+	"os"
 
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-
-	karmadaclientset "github.com/karmada-io/karmada/pkg/generated/clientset/versioned"
 )
 
 // Config holds all configuration for the backend
 type Config struct {
-	KarmadaKubeconfig string
-	MgmtKubeconfig    string
-	DatabaseURL       string
+	Kubeconfig   string
+	UseInCluster bool
 
 	// Kubernetes clients
-	KarmadaClient    *karmadaclientset.Clientset
-	KarmadaK8sClient *kubernetes.Clientset
-	MgmtClient       *kubernetes.Clientset
-	KarmadaConfig    *rest.Config
-	MgmtConfig       *rest.Config
-
-	// Database
-	DB *gorm.DB
+	K8sClient     *kubernetes.Clientset
+	DynamicClient dynamic.Interface
+	RestConfig    *rest.Config
 }
 
 // New creates a new configuration instance
-func New(karmadaKubeconfig, mgmtKubeconfig, databaseURL string) (*Config, error) {
+func New(kubeconfig string) (*Config, error) {
 	cfg := &Config{
-		KarmadaKubeconfig: karmadaKubeconfig,
-		MgmtKubeconfig:    mgmtKubeconfig,
-		DatabaseURL:       databaseURL,
+		Kubeconfig:   kubeconfig,
+		UseInCluster: kubeconfig == "",
 	}
 
-	// Initialize Karmada client
-	if err := cfg.initKarmadaClient(); err != nil {
-		return nil, fmt.Errorf("failed to initialize Karmada client: %w", err)
-	}
-
-	// Initialize management cluster client
-	if err := cfg.initMgmtClient(); err != nil {
-		return nil, fmt.Errorf("failed to initialize MGMT client: %w", err)
-	}
-
-	// Initialize database
-	if err := cfg.initDatabase(); err != nil {
-		return nil, fmt.Errorf("failed to initialize database: %w", err)
+	// Initialize Kubernetes client
+	if err := cfg.initK8sClient(); err != nil {
+		return nil, fmt.Errorf("failed to initialize Kubernetes client: %w", err)
 	}
 
 	log.Println("Configuration initialized successfully")
 	return cfg, nil
 }
 
-// initKarmadaClient initializes the Karmada Kubernetes client
-func (c *Config) initKarmadaClient() error {
-	config, err := clientcmd.BuildConfigFromFlags("", c.KarmadaKubeconfig)
-	if err != nil {
-		return fmt.Errorf("failed to build Karmada config: %w", err)
-	}
-	c.KarmadaConfig = config
+// initK8sClient initializes the Kubernetes client
+func (c *Config) initK8sClient() error {
+	var config *rest.Config
+	var err error
 
-	// Create Karmada-specific clientset
-	karmadaClient, err := karmadaclientset.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("failed to create Karmada clientset: %w", err)
+	if c.UseInCluster {
+		// Use in-cluster configuration (for pods running in Kubernetes)
+		config, err = rest.InClusterConfig()
+		if err != nil {
+			return fmt.Errorf("failed to get in-cluster config: %w", err)
+		}
+		log.Println("Using in-cluster Kubernetes configuration")
+	} else {
+		// Use kubeconfig file
+		config, err = clientcmd.BuildConfigFromFlags("", c.Kubeconfig)
+		if err != nil {
+			return fmt.Errorf("failed to build kubeconfig: %w", err)
+		}
+		log.Printf("Using kubeconfig from: %s", c.Kubeconfig)
 	}
-	c.KarmadaClient = karmadaClient
 
-	// Create standard Kubernetes clientset for Karmada
+	c.RestConfig = config
+
+	// Create standard Kubernetes clientset
 	k8sClient, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		return fmt.Errorf("failed to create Kubernetes clientset for Karmada: %w", err)
+		return fmt.Errorf("failed to create Kubernetes clientset: %w", err)
 	}
-	c.KarmadaK8sClient = k8sClient
+	c.K8sClient = k8sClient
 
-	log.Println("Karmada client initialized successfully")
-	return nil
-}
-
-// initMgmtClient initializes the management cluster Kubernetes client
-func (c *Config) initMgmtClient() error {
-	config, err := clientcmd.BuildConfigFromFlags("", c.MgmtKubeconfig)
+	// Create dynamic client for CRDs like RayJob
+	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
-		return fmt.Errorf("failed to build MGMT config: %w", err)
+		return fmt.Errorf("failed to create dynamic client: %w", err)
 	}
-	c.MgmtConfig = config
+	c.DynamicClient = dynamicClient
 
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("failed to create MGMT clientset: %w", err)
-	}
-	c.MgmtClient = client
-
-	log.Println("MGMT client initialized successfully")
-	return nil
-}
-
-// initDatabase initializes the database connection with optimized settings
-func (c *Config) initDatabase() error {
-	db, err := gorm.Open(postgres.Open(c.DatabaseURL), &gorm.Config{
-		// Optimize query performance
-		PrepareStmt: true,
-		// Skip default transaction for better performance
-		SkipDefaultTransaction: true,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to connect to database: %w", err)
-	}
-
-	// Configure connection pooling for better performance
-	sqlDB, err := db.DB()
-	if err != nil {
-		return fmt.Errorf("failed to get database handle: %w", err)
-	}
-
-	// Set connection pool settings
-	sqlDB.SetMaxIdleConns(10)           // Maximum idle connections
-	sqlDB.SetMaxOpenConns(100)          // Maximum open connections
-	sqlDB.SetConnMaxLifetime(time.Hour) // Maximum connection lifetime
-
-	// Auto-migrate database schema
-	if err := db.AutoMigrate(&TrainingJob{}); err != nil {
-		return fmt.Errorf("failed to auto-migrate database: %w", err)
-	}
-
-	c.DB = db
-	log.Println("Database initialized successfully with optimized settings")
+	log.Println("Kubernetes client initialized successfully")
 	return nil
 }
 
 // Close closes all connections
 func (c *Config) Close() {
-	if c.DB != nil {
-		sqlDB, err := c.DB.DB()
-		if err == nil {
-			sqlDB.Close()
-		}
+	// No resources to close currently
+}
+
+// GetNamespaceFromContext extracts namespace from Kubeflow context headers
+// If not found, returns "default"
+func GetNamespaceFromContext(namespace string) string {
+	if namespace != "" {
+		return namespace
 	}
+	
+	// Check for Kubeflow namespace environment variable
+	if ns := os.Getenv("KUBEFLOW_NAMESPACE"); ns != "" {
+		return ns
+	}
+	
+	return "default"
 }

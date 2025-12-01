@@ -1,0 +1,94 @@
+---
+# VirtualService for ML Platform Training Jobs (Kubeflow pattern)
+# This replaces the existing kf-training-job-ui VirtualService
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: kf-training-job-ui
+  namespace: kubeflow
+  labels:
+    app: ml-platform
+    component: frontend
+spec:
+  gateways:
+    - kubeflow/kubeflow-gateway
+  hosts:
+    - '*'
+  http:
+    # Frontend UI routes
+    - headers:
+        request:
+          add:
+            x-forwarded-prefix: /training-job
+      match:
+        - uri:
+            prefix: /training-job/
+      rewrite:
+        uri: /
+      route:
+        - destination:
+            host: training-job-web-app-service.kubeflow.svc.cluster.local
+            port:
+              number: 80
+    # Backend API routes
+    - match:
+        - uri:
+            prefix: /api/training-job/
+      rewrite:
+        uri: /api/
+      route:
+        - destination:
+            host: ml-platform-backend.kubeflow.svc.cluster.local
+            port:
+              number: 8080
+---
+# AuthorizationPolicy for ML Platform Backend
+# Ensures only authenticated requests with kubeflow-userid header are allowed
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: ml-platform-backend-auth
+  namespace: kubeflow
+  labels:
+    app: ml-platform
+    component: backend
+spec:
+  selector:
+    matchLabels:
+      app: ml-platform
+      component: backend
+  action: ALLOW
+  rules:
+    # Allow health checks without authentication
+    - to:
+        - operation:
+            paths: ["/health"]
+    # Require authentication for all other endpoints
+    - when:
+        - key: request.headers[kubeflow-userid]
+          notValues: [""]
+      from:
+        - source:
+            principals:
+              - "cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"
+---
+# AuthorizationPolicy for ML Platform Frontend
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: ml-platform-frontend-auth
+  namespace: kubeflow
+  labels:
+    app: ml-platform
+    component: frontend
+spec:
+  selector:
+    matchLabels:
+      app: ml-platform
+      component: frontend
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"

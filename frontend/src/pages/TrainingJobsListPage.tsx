@@ -10,11 +10,7 @@ import { jobsApi, APIError } from "@/lib/api-service";
 import { convertFromBackendResponse } from "@/lib/backend-converter";
 import { Loader2, RefreshCw } from "lucide-react";
 
-const JOB_STATUSES = new Set<JobStatus>(["Pending", "Running", "Succeeded", "Failed"]);
-
-function formatTimestamp(ts: number) {
-  return new Date(ts).toLocaleString();
-}
+const JOB_STATUSES = new Set<JobStatus>(["Pending", "Running", "Succeeded", "Failed", "Stopped"]);
 
 function CreateButton() {
   const [searchParams] = useSearchParams();
@@ -32,10 +28,10 @@ export default function TrainingJobsListPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [useBackend, setUseBackend] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     let ignore = false;
-    let timer: number | undefined;
 
     async function load() {
       try {
@@ -89,28 +85,12 @@ export default function TrainingJobsListPage() {
     }
 
     load();
-    timer = window.setInterval(load, 5000);
+    // Removed auto-refresh - users can manually refresh if needed
 
     return () => {
       ignore = true;
-      if (timer) window.clearInterval(timer);
     };
   }, [useBackend]);
-
-  useEffect(() => {
-    if (!jobs.length) return;
-    const interval = window.setInterval(() => {
-      setJobs((prev) =>
-        prev.map((job) => {
-          if (job.status === "Pending" && job.pendingUntil && Date.now() >= job.pendingUntil) {
-            return { ...job, status: "Running" as JobStatus, pendingUntil: undefined };
-          }
-          return job;
-        })
-      );
-    }, 1000);
-    return () => window.clearInterval(interval);
-  }, [jobs.length]);
 
   const sortedJobs = useMemo(() => [...jobs].sort((a, b) => b.createdAt - a.createdAt), [jobs]);
 
@@ -129,7 +109,7 @@ export default function TrainingJobsListPage() {
           
           {/* Stats Bar */}
           {sortedJobs.length > 0 && (
-            <div className="mt-8 grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div className="mt-8 grid grid-cols-2 gap-4 md:grid-cols-5">
               <div className="rounded-lg bg-slate-50 px-4 py-3">
                 <p className="text-sm text-slate-600">Total Jobs</p>
                 <p className="mt-1 text-2xl font-bold text-slate-900">{sortedJobs.length}</p>
@@ -150,6 +130,12 @@ export default function TrainingJobsListPage() {
                 <p className="text-sm text-amber-700">Pending</p>
                 <p className="mt-1 text-2xl font-bold text-amber-900">
                   {sortedJobs.filter((j) => j.status === "Pending").length}
+                </p>
+              </div>
+              <div className="rounded-lg bg-red-50 px-4 py-3">
+                <p className="text-sm text-red-700">Failed</p>
+                <p className="mt-1 text-2xl font-bold text-red-900">
+                  {sortedJobs.filter((j) => j.status === "Failed").length}
                 </p>
               </div>
             </div>
@@ -174,10 +160,17 @@ export default function TrainingJobsListPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setUseBackend(prev => !prev)}
+                onClick={async () => {
+                  setRefreshing(true);
+                  setUseBackend(true);
+                  // Trigger reload by toggling state
+                  await new Promise(resolve => setTimeout(resolve, 100));
+                  window.location.reload();
+                }}
+                disabled={refreshing}
                 className="flex-shrink-0"
               >
-                <RefreshCw className="h-4 w-4 mr-1" />
+                <RefreshCw className={`h-4 w-4 mr-1 ${refreshing ? 'animate-spin' : ''}`} />
                 Retry
               </Button>
             </div>
@@ -206,53 +199,86 @@ export default function TrainingJobsListPage() {
           </Card>
         ) : (
           <div className="space-y-3">
-            {sortedJobs.map((job) => (
-              <Card key={job.id} className="shadow-sm hover:shadow-md transition-shadow">
-                <CardContent className="p-6">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                    {/* Left Side - Job Info */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-3 mb-2">
-                        <h3 className="text-lg font-semibold text-slate-900 truncate">{job.id}</h3>
-                        <Badge
-                          variant={
-                            job.status === "Succeeded"
-                              ? "secondary"
-                              : job.status === "Running"
-                              ? "default"
-                              : job.status === "Pending"
-                              ? "outline"
-                              : "destructive"
-                          }
-                          className="flex-shrink-0"
-                        >
-                          {job.status === "Succeeded" && <span className="mr-1">✓</span>}
-                          {job.status === "Running" && <span className="mr-1">●</span>}
-                          {job.status === "Failed" && <span className="mr-1">✕</span>}
-                          {job.status === "Pending" && <span className="mr-1">○</span>}
-                          {job.status}
-                        </Badge>
+            {sortedJobs.map((job) => {
+              // Helper function to get status badge color
+              const getStatusBadgeClass = (status: string) => {
+                switch (status) {
+                  case "SUCCEEDED":
+                    return "bg-emerald-100 text-emerald-800 border-emerald-300";
+                  case "RUNNING":
+                    return "bg-blue-100 text-blue-800 border-blue-300";
+                  case "FAILED":
+                    return "bg-red-100 text-red-800 border-red-300";
+                  case "PENDING":
+                    return "bg-amber-100 text-amber-800 border-amber-300";
+                  case "STOPPED":
+                    return "bg-gray-100 text-gray-800 border-gray-300";
+                  default:
+                    return "bg-slate-100 text-slate-800 border-slate-300";
+                }
+              };
+              
+              return (
+                <Card key={job.id} className="shadow-sm hover:shadow-md transition-shadow">
+                  <CardContent className="p-6">
+                    <div className="flex flex-col gap-3">
+                      {/* Job Header with Status and Times */}
+                      <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
+                        <div className="flex-1 min-w-0">
+                          <h3 className="text-lg font-semibold text-slate-900 truncate">{job.id}</h3>
+                          <p className="text-sm text-slate-600 mt-1">
+                            <span className="font-medium">Algorithm:</span> {job.algorithm}
+                          </p>
+                        </div>
+                        
+                        {/* Status Badge */}
+                        {(job.jobStatus || job.status) && (
+                          <Badge
+                            className={`shrink-0 ${getStatusBadgeClass(job.jobStatus || job.status.toUpperCase())}`}
+                          >
+                            {(job.jobStatus || job.status) === "SUCCEEDED" && <span className="mr-1">✓</span>}
+                            {(job.jobStatus || job.status) === "RUNNING" && <span className="mr-1">●</span>}
+                            {(job.jobStatus || job.status) === "FAILED" && <span className="mr-1">✕</span>}
+                            {(job.jobStatus || job.status) === "PENDING" && <span className="mr-1">⏳</span>}
+                            {(job.jobStatus || job.status) === "STOPPED" && <span className="mr-1">⏹</span>}
+                            {job.jobStatus || job.status}
+                          </Badge>
+                        )}
+                        
+                        {/* Time Info - Same Row */}
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-600">
+                          {job.startTime && (
+                            <div className="flex items-center gap-1">
+                              <span className="text-slate-500">Start:</span>
+                              <span className="font-medium text-slate-900">
+                                {new Date(job.startTime).toLocaleString()}
+                              </span>
+                            </div>
+                          )}
+                          {job.endTime && (
+                            <div className="flex items-center gap-1">
+                              <span className="text-slate-500">End:</span>
+                              <span className="font-medium text-slate-900">
+                                {new Date(job.endTime).toLocaleString()}
+                              </span>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <p className="text-sm text-slate-600">
-                        <span className="font-medium">Algorithm:</span> {job.algorithm}
-                      </p>
+                      
+                      {/* Deployment Status (if exists) */}
+                      {job.deploymentStatus && (
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline" className="shrink-0 text-xs">
+                            Deploy: {job.deploymentStatus}
+                          </Badge>
+                        </div>
+                      )}
                     </div>
-                    
-                    {/* Right Side - Meta Info */}
-                    <div className="flex flex-wrap gap-6 text-sm">
-                      <div>
-                        <p className="text-slate-500 mb-1">Created</p>
-                        <p className="font-medium text-slate-900">{formatTimestamp(job.createdAt)}</p>
-                      </div>
-                      <div>
-                        <p className="text-slate-500 mb-1">Priority</p>
-                        <p className="font-medium text-slate-900">{job.priority}</p>
-                      </div>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+                  </CardContent>
+                </Card>
+              );
+            })}
           </div>
         )}
       </main>

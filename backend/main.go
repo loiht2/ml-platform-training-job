@@ -13,60 +13,50 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/loiht2/ml-platform-training-job/backend/config"
 	"github.com/loiht2/ml-platform-training-job/backend/handlers"
-	"github.com/loiht2/ml-platform-training-job/backend/karmada"
-	"github.com/loiht2/ml-platform-training-job/backend/monitor"
-	"github.com/loiht2/ml-platform-training-job/backend/repository"
+	"github.com/loiht2/ml-platform-training-job/backend/k8s"
+	"github.com/loiht2/ml-platform-training-job/backend/middleware"
 )
 
 func main() {
 	// Parse command line arguments
-	karmadaKubeconfig := flag.String("karmada-kubeconfig", os.Getenv("KARMADA_KUBECONFIG"), "Path to Karmada kubeconfig file")
-	mgmtKubeconfig := flag.String("mgmt-kubeconfig", os.Getenv("MGMT_KUBECONFIG"), "Path to management cluster kubeconfig file")
-	databaseURL := flag.String("database-url", os.Getenv("DATABASE_URL"), "Database connection URL")
+	kubeconfig := flag.String("kubeconfig", os.Getenv("KUBECONFIG"), "Path to kubeconfig file (optional, uses in-cluster config if not provided)")
 	port := flag.String("port", getEnvOrDefault("PORT", "8080"), "Server port")
 	flag.Parse()
 
-	// Validate required arguments
-	if *karmadaKubeconfig == "" {
-		log.Fatal("Karmada kubeconfig is required (use --karmada-kubeconfig or KARMADA_KUBECONFIG env)")
-	}
-	if *mgmtKubeconfig == "" {
-		log.Fatal("MGMT kubeconfig is required (use --mgmt-kubeconfig or MGMT_KUBECONFIG env)")
-	}
-	if *databaseURL == "" {
-		log.Fatal("Database URL is required (use --database-url or DATABASE_URL env)")
-	}
-
+	log.Println("Starting ML Platform Training Job Backend (Single-Cluster Kubeflow Edition - No Database)")
+	
 	// Initialize configuration
-	cfg, err := config.New(*karmadaKubeconfig, *mgmtKubeconfig, *databaseURL)
+	cfg, err := config.New(*kubeconfig)
 	if err != nil {
 		log.Fatalf("Failed to initialize configuration: %v", err)
 	}
 	defer cfg.Close()
 
-	// Initialize database repository
-	repo := repository.NewRepository(cfg.DB)
-
-	// Initialize Karmada client
-	karmadaClient := karmada.NewClient(cfg.KarmadaClient, cfg.KarmadaK8sClient)
-
-	// Initialize and start job monitor (polls every 1 second)
-	jobMonitor := monitor.NewJobMonitor(repo, karmadaClient)
-	jobMonitor.Start()
-	defer jobMonitor.Stop()
+	// Initialize Kubernetes client
+	k8sClient := k8s.NewClient(cfg.K8sClient, cfg.DynamicClient)
 
 	// Initialize handlers
-	handler := handlers.NewHandler(cfg, repo)
+	handler := handlers.NewHandler(cfg, k8sClient)
 
 	// Setup Gin router
 	router := gin.Default()
 
-	// Enable CORS
-	router.Use(corsMiddleware())
+	// Enable CORS (must be first)
+	router.Use(middleware.CORSMiddleware())
+	
+	// Add Kubeflow authentication middleware (extracts user from headers)
+	router.Use(middleware.KubeflowAuthMiddleware())
+	
+	// Add namespace access validation
+	router.Use(middleware.NamespaceAccessMiddleware())
 
-	// Health check
+	// Health check (no auth required)
 	router.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "healthy"})
+		c.JSON(200, gin.H{
+			"status": "healthy", 
+			"mode":   "kubeflow-integrated",
+			"user":   middleware.GetUserEmail(c),
+		})
 	})
 
 	// API routes
@@ -82,13 +72,12 @@ func main() {
 			jobs.GET("/:id/status", handler.GetTrainingJobStatus)
 			jobs.GET("/:id/logs", handler.GetTrainingJobLogs)
 		}
-
-		// Member cluster resources proxy
-		proxy := api.Group("/proxy")
-		{
-			proxy.GET("/clusters", handler.ListMemberClusters)
-			proxy.GET("/clusters/:cluster/resources", handler.GetClusterResources)
-		}
+		
+		// Namespace management (Kubeflow integration)
+		api.GET("/namespaces", handler.ListNamespaces)
+		
+		// File upload to MinIO
+		api.POST("/upload", handler.UploadFileToMinIO)
 	}
 
 	// Create HTTP server with proper configuration
@@ -118,34 +107,14 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Stop job monitor first
-	log.Println("Stopping job monitor...")
-	jobMonitor.Stop()
-
 	// Shutdown HTTP server
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
 
-	// Close database connections
+	// Close config
 	cfg.Close()
 	log.Println("Server stopped gracefully")
-}
-
-func corsMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
-		c.Next()
-	}
 }
 
 func getEnvOrDefault(key, defaultValue string) string {

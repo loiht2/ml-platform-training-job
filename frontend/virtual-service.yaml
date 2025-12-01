@@ -3,56 +3,55 @@ kind: VirtualService
 metadata:
   name: kf-training-job-ui
   namespace: kubeflow
+  labels:
+    app: ml-platform
+    component: frontend
 spec:
   gateways:
     - kubeflow/kubeflow-gateway
   hosts:
     - '*'
   http:
-    # Direct root (with or without trailing slash)
-    - match:
+    # Centraldashboard iframe URL: /_/training-job/
+    - headers:
+        request:
+          add:
+            x-forwarded-prefix: /training-job
+      match:
         - uri:
-            exact: /training-job
-        - uri:
-            exact: /training-job/
+            prefix: /_/training-job/
       rewrite:
         uri: /
       route:
         - destination:
-            host: training-job-ui.default.svc.cluster.local
+            host: training-job-web-app-service.kubeflow.svc.cluster.local
             port:
               number: 80
-
-    - match:
+    
+    # Direct URL: /training-job/
+    - headers:
+        request:
+          add:
+            x-forwarded-prefix: /training-job
+      match:
         - uri:
-            prefix: /training-job/create
+            prefix: /training-job/
       rewrite:
-        uri: /create
+        uri: /
       route:
         - destination:
-            host: training-job-ui.default.svc.cluster.local
+            host: training-job-web-app-service.kubeflow.svc.cluster.local
             port:
               number: 80
-
+    
+    # Backend API routes: /api/training-job/ -> /api/
     - match:
         - uri:
-            prefix: /training-job/assets/
+            prefix: /api/training-job/
       rewrite:
-        uri: /assets/
+        uri: /api/
       route:
         - destination:
-            host: training-job-ui.default.svc.cluster.local
+            host: ml-platform-backend.kubeflow.svc.cluster.local
             port:
-              number: 80
-
-    # Direct base path with additional segments
-    - match:
-        - uri:
-            prefix: /create
-        - uri:
-            prefix: /assets/
-      route:
-        - destination:
-            host: training-job-ui.default.svc.cluster.local
-            port:
-              number: 80
+              number: 8080
