@@ -7,8 +7,7 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { ChevronDown, ChevronUp, Copy, FileJson2, Plus, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Plus, Trash2, X } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { getDefaultHyperparameters, getHyperparameterConfig, type HyperparameterValues } from "@/app/create/hyperparameters";
 import { persistJob } from "@/lib/jobs-storage";
@@ -121,8 +120,8 @@ function validateForm(form: TrainingJobForm) {
     if (!c.channelName) errors.push(`[Input Data - Channel #${idx + 1}] Channel name is required.`);
     if (sourceType === "object-storage") {
       if (!c.storageProvider) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Storage provider is required.`);
-      if (!c.bucket) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Bucket/container is required.`);
-      if (!c.prefix) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Prefix/path is required.`);
+      if (!c.bucket) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Bucket is required.`);
+      if (!c.prefix) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Prefix / Path is required.`);
     } else if (sourceType === "upload") {
       if (!c.uploadFileName) errors.push(`[Input Data - Channel '${c.channelName || idx + 1}'] Upload file is required. Please click 'Upload CSV File' button to select a file.`);
       if (c.uploadFileName) {
@@ -139,6 +138,27 @@ function validateForm(form: TrainingJobForm) {
     if (!form.outputDataConfig.bucket) errors.push("[Output Data Configuration] Bucket is required.");
     if (!form.outputDataConfig.prefix) errors.push("[Output Data Configuration] Prefix/path is required.");
   }
+  
+  // Validate checkpoint configuration
+  if (form.checkpointConfig?.enabled) {
+    const checkpointMode = form.checkpointConfig.configMode || "default";
+    if (checkpointMode === "custom") {
+      if (!form.checkpointConfig.storageProvider) errors.push("[Checkpoint Configuration] Storage provider is required.");
+      if (!form.checkpointConfig.bucket) errors.push("[Checkpoint Configuration] Bucket is required.");
+      if (!form.checkpointConfig.prefix) errors.push("[Checkpoint Configuration] Prefix/path is required.");
+    }
+  }
+  
+  // Validate channel name + type uniqueness
+  const channelKeys = new Map<string, number>();
+  form.inputDataConfig.forEach((channel, idx) => {
+    const key = `${channel.channelName}:${channel.channelType || 'train'}`;
+    if (channelKeys.has(key)) {
+      errors.push(`[Input Data - Channel #${idx + 1}] Channel name '${channel.channelName}' with type '${channel.channelType || 'train'}' already exists at channel #${channelKeys.get(key)! + 1}.`);
+    } else {
+      channelKeys.set(key, idx);
+    }
+  });
   
   return errors;
 }
@@ -307,8 +327,8 @@ function ChannelEditor({ value, onChange, hasError, bucketError, prefixError, fe
               </Select>
             </div>
             <div className="grid gap-y-3 gap-x-30 md:grid-cols-2">
-              <div className="flex items-center gap-2">
-                <Label className="w-32 flex-shrink-0">Bucket / Container</Label>
+              <div className="flex items-start gap-2">
+                <Label className="w-32 flex-shrink-0 pt-3">Bucket</Label>
                 <div className="flex-1">
                   <Input 
                     value={value.bucket || ""} 
@@ -321,8 +341,8 @@ function ChannelEditor({ value, onChange, hasError, bucketError, prefixError, fe
                   )}
                 </div>
               </div>
-              <div className="flex items-center gap-0">
-                <Label className="w-25 flex-shrink-0">Prefix / Path</Label>
+                <div className="flex items-start gap-0">
+                  <Label className="w-25 flex-shrink-0 pt-3">Prefix / Path</Label>
                 <div className="flex-1">
                   <Input 
                     value={value.prefix || ""} 
@@ -336,11 +356,10 @@ function ChannelEditor({ value, onChange, hasError, bucketError, prefixError, fe
                 </div>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Label className="w-32 flex-shrink-0">Endpoint (optional)</Label>
+            <div className="flex items-start gap-2">
+              <Label className="w-32 flex-shrink-0 pt-3">Endpoint (optional)</Label>
               <div className="flex-1">
-                <Input value={value.endpoint || ""} onChange={(e) => updateChannel({ endpoint: e.target.value })} placeholder="https://minio.example.com" />
-                <p className="text-xs text-slate-500 mt-1">Leave blank for managed services; specify an endpoint for self-hosted or custom object storage.</p>
+                <Input value={value.endpoint || ""} onChange={(e) => updateChannel({ endpoint: e.target.value })} placeholder="http://minio.example.com" />
               </div>
             </div>
           </div>
@@ -539,18 +558,24 @@ export default function CreateTrainingJobUI() {
       prefix: "",
       endpoint: "",
     },
+    checkpointConfig: {
+      enabled: false,
+      configMode: "default",
+      storageProvider: "minio",
+      bucket: "",
+      prefix: "",
+      endpoint: "",
+    },
     hyperparameters: {
       [defaultAlgorithmId]: getDefaultHyperparameters(defaultAlgorithmId),
     },
     customHyperparameters: {},
   }));
 
-  const [checkpointEnabled, setCheckpointEnabled] = useState(false);
-  const [reviewOpen, setReviewOpen] = useState(false);
+
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<null | { ok: boolean; message: string }>(null);
 
-  const payload = useMemo(() => formToPayload(form), [form]);
   const errors = useMemo(() => validateForm(form), [form]);
 
   // Fetch Kubeflow environment info on mount
@@ -572,13 +597,29 @@ export default function CreateTrainingJobUI() {
           ...prev.outputDataConfig,
           storageProvider: "minio",
           bucket: currentNamespace,
-          prefix: `Output/${form.jobName}`,
+          prefix: `output/${form.jobName}`,
           endpoint: "",
-          artifactUri: `s3://${currentNamespace}/Output/${form.jobName}`,
+          artifactUri: `s3://${currentNamespace}/output/${form.jobName}`,
         },
       }));
     }
   }, [form.outputDataConfig.configMode, currentNamespace, form.jobName]);
+
+  // Sync default checkpoint config when job name or namespace changes
+  useEffect(() => {
+    if (form.checkpointConfig?.enabled && form.checkpointConfig.configMode === "default" && currentNamespace && form.jobName) {
+      setForm((prev) => ({
+        ...prev,
+        checkpointConfig: {
+          ...prev.checkpointConfig!,
+          storageProvider: "minio",
+          bucket: currentNamespace,
+          prefix: `checkpoint/${form.jobName}`,
+          endpoint: "",
+        },
+      }));
+    }
+  }, [form.checkpointConfig?.enabled, form.checkpointConfig?.configMode, currentNamespace, form.jobName]);
 
   const update = useCallback(<K extends keyof TrainingJobForm>(key: K, value: TrainingJobForm[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -795,9 +836,8 @@ export default function CreateTrainingJobUI() {
         message: `Training job "${backendResponse.jobName}" created successfully! Job ID: ${backendResponse.id}.`,
       });
       
-      // Close dialog and navigate after a short delay
+      // Navigate after a short delay
       setTimeout(() => {
-        setReviewOpen(false);
         navigate({ pathname: LIST_ROUTE, search: location.search }, { replace: true });
       }, 1500);
       
@@ -1266,16 +1306,129 @@ export default function CreateTrainingJobUI() {
 
           <Card className="shadow-md border-rose-100 bg-gradient-to-br from-white to-rose-50/30 hover:shadow-lg transition-shadow mt-4">
             <CardContent className="pt-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between mb-3">
                 <div className="flex-1">
                   <h3 className="text-base font-semibold text-slate-900 mb-1">Checkpoint config - optional</h3>
                   <p className="text-sm text-slate-600">The algorithm is responsible for periodically generating checkpoints.</p>
                 </div>
                 <Switch
-                  checked={checkpointEnabled}
-                  onCheckedChange={setCheckpointEnabled}
+                  checked={form.checkpointConfig?.enabled || false}
+                  onCheckedChange={(checked) => {
+                    setForm((prev) => ({
+                      ...prev,
+                      checkpointConfig: {
+                        enabled: checked,
+                        configMode: "default",
+                        storageProvider: "minio",
+                        bucket: checked ? currentNamespace : "",
+                        prefix: checked ? `checkpoint/${form.jobName}` : "",
+                        endpoint: "",
+                      },
+                    }));
+                  }}
                 />
               </div>
+              
+              {form.checkpointConfig?.enabled && (
+                <div className="grid gap-3 pt-3 border-t border-rose-200">
+                  <div className="flex items-center gap-2">
+                    <Label className="w-32 shrink-0">Configuration</Label>
+                    <RadioGroup
+                      value={form.checkpointConfig.configMode || "default"}
+                      onValueChange={(v) => {
+                        const mode = v as "default" | "custom";
+                        if (mode === "default") {
+                          setForm((prev) => ({
+                            ...prev,
+                            checkpointConfig: {
+                              ...prev.checkpointConfig!,
+                              configMode: mode,
+                              storageProvider: "minio",
+                              bucket: currentNamespace,
+                              prefix: `checkpoint/${form.jobName}`,
+                              endpoint: "",
+                            },
+                          }));
+                        } else {
+                          setForm((prev) => ({
+                            ...prev,
+                            checkpointConfig: {
+                              ...prev.checkpointConfig!,
+                              configMode: mode,
+                              storageProvider: "minio",
+                              bucket: "",
+                              prefix: "",
+                              endpoint: "",
+                            },
+                          }));
+                        }
+                      }}
+                      className="flex flex-wrap gap-2 flex-1"
+                    >
+                      <label htmlFor="checkpoint-config-default" className="flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer hover:bg-slate-50">
+                        <RadioGroupItem value="default" id="checkpoint-config-default" />
+                        <span className="font-normal">Default</span>
+                      </label>
+                      <label htmlFor="checkpoint-config-custom" className="flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer hover:bg-slate-50">
+                        <RadioGroupItem value="custom" id="checkpoint-config-custom" />
+                        <span className="font-normal">Custom</span>
+                      </label>
+                    </RadioGroup>
+                  </div>
+
+                  <div className="grid gap-3">
+                    <div className="flex items-center gap-2">
+                      <Label className="w-32 shrink-0">Provider</Label>
+                      <Select 
+                        value={form.checkpointConfig.storageProvider || "minio"} 
+                        onValueChange={(v) => setForm((prev) => ({
+                          ...prev,
+                          checkpointConfig: { ...prev.checkpointConfig!, storageProvider: v as StorageProvider },
+                        }))}
+                        disabled={form.checkpointConfig.configMode === "default"}
+                      >
+                        <SelectTrigger className="flex-1">
+                          <SelectValue placeholder="Select provider" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {storageProviders.map((p) => (
+                            <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="grid gap-y-3 gap-x-30 md:grid-cols-2">
+                      <div className="flex items-center gap-2">
+                        <Label className="w-32 shrink-0">Bucket</Label>
+                        <Input
+                          value={form.checkpointConfig.bucket || ""}
+                          onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            checkpointConfig: { ...prev.checkpointConfig!, bucket: e.target.value },
+                          }))}
+                          placeholder="my-bucket"
+                          disabled={form.checkpointConfig.configMode === "default"}
+                          className={`flex-1 ${form.checkpointConfig.configMode === "default" ? 'bg-slate-50 text-slate-700' : ''}`}
+                        />
+                      </div>
+                      <div className="flex items-center gap-0">
+                        <Label className="w-25 shrink-0">Prefix / Path</Label>
+                        <Input
+                          value={form.checkpointConfig.prefix || ""}
+                          onChange={(e) => setForm((prev) => ({
+                            ...prev,
+                            checkpointConfig: { ...prev.checkpointConfig!, prefix: e.target.value },
+                          }))}
+                          placeholder="checkpoint/path"
+                          disabled={form.checkpointConfig.configMode === "default"}
+                          className={`flex-1 ${form.checkpointConfig.configMode === "default" ? 'bg-slate-50 text-slate-700' : ''}`}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -1296,9 +1449,9 @@ export default function CreateTrainingJobUI() {
                           configMode: mode,
                           storageProvider: "minio",
                           bucket: currentNamespace,
-                          prefix: `Output/${form.jobName}`,
+                          prefix: `output/${form.jobName}`,
                           endpoint: "",
-                          artifactUri: `s3://${currentNamespace}/Output/${form.jobName}`,
+                          artifactUri: `s3://${currentNamespace}/output/${form.jobName}`,
                         });
                       } else {
                         updateOutputDataConfig({
@@ -1343,26 +1496,27 @@ export default function CreateTrainingJobUI() {
                     </Select>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <Label className="w-32 shrink-0">Bucket</Label>
-                    <Input
-                      value={form.outputDataConfig.bucket || ""}
-                      onChange={(e) => updateOutputDataConfig({ bucket: e.target.value })}
-                      placeholder="my-bucket"
-                      disabled={form.outputDataConfig.configMode === "default"}
-                      className={`flex-1 ${form.outputDataConfig.configMode === "default" ? 'bg-slate-50 text-slate-700' : ''}`}
-                    />
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <Label className="w-32 shrink-0">Prefix / Path</Label>
-                    <Input
-                      value={form.outputDataConfig.prefix || ""}
-                      onChange={(e) => updateOutputDataConfig({ prefix: e.target.value })}
-                      placeholder="output/path"
-                      disabled={form.outputDataConfig.configMode === "default"}
-                      className={`flex-1 ${form.outputDataConfig.configMode === "default" ? 'bg-slate-50 text-slate-700' : ''}`}
-                    />
+                  <div className="grid gap-y-3 gap-x-30 md:grid-cols-2">
+                    <div className="flex items-center gap-2">
+                      <Label className="w-32 flex-shrink-0">Bucket</Label>
+                      <Input
+                        value={form.outputDataConfig.bucket || ""}
+                        onChange={(e) => updateOutputDataConfig({ bucket: e.target.value })}
+                        placeholder="my-bucket"
+                        disabled={form.outputDataConfig.configMode === "default"}
+                        className={`flex-1 ${form.outputDataConfig.configMode === "default" ? 'bg-slate-50 text-slate-700' : ''}`}
+                      />
+                    </div>
+                    <div className="flex items-center gap-0">
+                      <Label className="w-25 flex-shrink-0">Prefix / Path</Label>
+                      <Input
+                        value={form.outputDataConfig.prefix || ""}
+                        onChange={(e) => updateOutputDataConfig({ prefix: e.target.value })}
+                        placeholder="output/path"
+                        disabled={form.outputDataConfig.configMode === "default"}
+                        className={`flex-1 ${form.outputDataConfig.configMode === "default" ? 'bg-slate-50 text-slate-700' : ''}`}
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1439,56 +1593,6 @@ export default function CreateTrainingJobUI() {
                   <span className="text-sm font-medium">{submitResult.message}</span>
                 </div>
               )}
-              <Dialog open={reviewOpen} onOpenChange={setReviewOpen}>
-                <DialogTrigger asChild>
-                  <Button 
-                    variant="outline"
-                    disabled={errors.length > 0} 
-                    size="lg"
-                    className="border-slate-300 hover:bg-slate-100"
-                  >
-                    <FileJson2 className="mr-2 h-5 w-5" /> 
-                    Review JSON
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-                  <DialogHeader>
-                    <DialogTitle className="text-2xl">Review Job Configuration</DialogTitle>
-                  </DialogHeader>
-                <div className="space-y-6">
-                  {errors.length > 0 && (
-                    <Card className="border-red-200 bg-gradient-to-br from-red-50 to-rose-50 shadow-sm">
-                      <CardContent className="pt-6">
-                        <p className="text-base font-semibold text-red-900 mb-3">Please resolve the following:</p>
-                        <ul className="list-disc ml-5 space-y-1 text-red-700 text-sm">
-                          {errors.map((e, i) => (
-                            <li key={i}>{e}</li>
-                          ))}
-                        </ul>
-                      </CardContent>
-                    </Card>
-                  )}
-                  <div className="rounded-lg border border-slate-200 bg-gradient-to-br from-slate-50 to-blue-50/30 p-4">
-                    <pre className="text-xs overflow-auto max-h-96 text-slate-700">
-{JSON.stringify(payload, null, 2)}
-                    </pre>
-                  </div>
-                  <div className="flex justify-end gap-3">
-                    <Button variant="outline" onClick={() => navigator.clipboard.writeText(JSON.stringify(payload, null, 2))} className="border-slate-300 hover:bg-slate-100 hover:border-slate-400 transition-colors">
-                      <Copy className="mr-2 h-4 w-4" /> Copy JSON
-                    </Button>
-                    <Button onClick={submit} disabled={submitting} className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold shadow-md hover:shadow-lg transition-all">
-                      {submitting ? "Submitting…" : "Submit"}
-                    </Button>
-                  </div>
-                  {submitResult && (
-                    <div className={`p-4 rounded-lg ${submitResult.ok ? "bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-200" : "bg-gradient-to-br from-red-50 to-rose-50 border border-red-200"}`}>
-                      <p className={`text-sm font-semibold ${submitResult.ok ? "text-emerald-700" : "text-red-700"}`}>{submitResult.message}</p>
-                    </div>
-                  )}
-                </div>
-              </DialogContent>
-            </Dialog>
             </div>
           </div>
           </div>

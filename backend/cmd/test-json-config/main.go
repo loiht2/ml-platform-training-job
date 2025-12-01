@@ -99,8 +99,8 @@ func main() {
 		fmt.Printf("⚠️  Could not parse runtimeEnvYAML: %v\n", err)
 	} else {
 		if envVars, ok := runtimeEnv["env_vars"].(map[interface{}]interface{}); ok {
-			if tuningConfig, ok := envVars["TUNING_CONFIG"].(string); ok {
-				fmt.Println("✅ TUNING_CONFIG found!")
+			if tuningConfig, ok := envVars["TRAINING_CONFIG"].(string); ok {
+				fmt.Println("✅ TRAINING_CONFIG found!")
 				fmt.Println()
 				fmt.Println("JSON Configuration:")
 				fmt.Println("----------------------------------------")
@@ -138,7 +138,7 @@ func main() {
 					fmt.Println("========================================")
 				}
 			} else {
-				fmt.Println("❌ TUNING_CONFIG not found in env_vars")
+				fmt.Println("❌ TRAINING_CONFIG not found in env_vars")
 			}
 		} else {
 			fmt.Println("❌ env_vars not found in runtimeEnvYAML")

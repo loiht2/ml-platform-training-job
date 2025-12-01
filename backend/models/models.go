@@ -11,6 +11,11 @@ type TrainingJobRequest struct {
 	StoppingCondition  StoppingCondition   `json:"stoppingCondition"`
 	InputDataConfig    []InputDataConfig   `json:"inputDataConfig"`
 	OutputDataConfig   OutputDataConfig    `json:"outputDataConfig"`
+	// New fields for TRAINING_CONFIG
+	Input              []Input             `json:"input,omitempty"`
+	Output             *Output             `json:"output,omitempty"`
+	Checkpoint         *Checkpoint         `json:"checkpoint,omitempty"`
+	CurrentNamespace   string              `json:"currentNamespace,omitempty"`
 	Hyperparameters    HyperparametersMap  `json:"hyperparameters"`
 	CustomHyperparameters map[string]interface{} `json:"customHyperparameters"`
 	// Removed: TargetClusters - single-cluster deployment only
@@ -52,8 +57,38 @@ type InputDataConfig struct {
 	Prefix          string `json:"prefix"`
 }
 
+// New Input format for TRAINING_CONFIG
+type Input struct {
+	ChannelName     string   `json:"channelName"`
+	ChannelType     string   `json:"channelType"`
+	SourceType      string   `json:"sourceType"`
+	StorageProvider string   `json:"storageProvider"`
+	Endpoint        string   `json:"endpoint"`
+	Bucket          string   `json:"bucket"`
+	Path            string   `json:"path"`
+	FeatureNames    []string `json:"featureNames,omitempty"`
+	LabelName       string   `json:"labelName,omitempty"`
+	UploadFileName  string   `json:"uploadFileName,omitempty"`
+}
+
 type OutputDataConfig struct {
 	ArtifactURI string `json:"artifactUri"`
+}
+
+// New Output format for TRAINING_CONFIG
+type Output struct {
+	StorageProvider string `json:"storageProvider"`
+	Bucket          string `json:"bucket"`
+	Path            string `json:"path"`
+	Endpoint        string `json:"endpoint"`
+}
+
+// New Checkpoint format for TRAINING_CONFIG
+type Checkpoint struct {
+	StorageProvider string `json:"storageProvider"`
+	Bucket          string `json:"bucket"`
+	Path            string `json:"path"`
+	Endpoint        string `json:"endpoint"`
 }
 
 type HyperparametersMap struct {

@@ -10,7 +10,7 @@
 
 ## What Changed
 
-The backend now passes **all configuration as a single JSON object** in the `TUNING_CONFIG` environment variable instead of converting each parameter to individual environment variables.
+The backend now passes **all configuration as a single JSON object** in the `TRAINING_CONFIG` environment variable instead of converting each parameter to individual environment variables.
 
 ### Before (v1.1) - Individual ENV Variables
 ```yaml
@@ -31,7 +31,7 @@ env_vars:
 ### After (v1.2) - Single JSON Config
 ```yaml
 env_vars:
-  TUNING_CONFIG: |
+  TRAINING_CONFIG: |
     {
       "num_worker": 1,
       "use_gpu": false,
@@ -72,7 +72,7 @@ env_vars:
 - Easy to add new algorithms or parameters
 
 ### ✅ **Easier Container Integration**
-- Single environment variable to read: `TUNING_CONFIG`
+- Single environment variable to read: `TRAINING_CONFIG`
 - Standard JSON parsing in any language
 - Hierarchical structure (s3, xgboost, custom sections)
 
@@ -101,7 +101,7 @@ go test -v ./converter -run TestConvertToRayJobV2WithJSONConfig
 
 ### Validation ✅
 The test output confirms:
-- ✅ TUNING_CONFIG environment variable present
+- ✅ TRAINING_CONFIG environment variable present
 - ✅ Valid JSON structure (can be parsed)
 - ✅ All configuration sections included:
   - Training control: num_worker, use_gpu, run_name
@@ -120,7 +120,7 @@ import json
 import os
 
 # Read configuration
-config_str = os.environ.get('TUNING_CONFIG', '{}')
+config_str = os.environ.get('TRAINING_CONFIG', '{}')
 config = json.loads(config_str)
 
 # Access values
@@ -160,7 +160,7 @@ type Config struct {
 }
 
 func main() {
-    configStr := os.Getenv("TUNING_CONFIG")
+    configStr := os.Getenv("TRAINING_CONFIG")
     var config Config
     json.Unmarshal([]byte(configStr), &config)
     
@@ -193,14 +193,14 @@ func main() {
 kubectl get rayjobs -n admin
 
 # Check the RayJob YAML
-kubectl get rayjob <job-name> -n admin -o yaml | grep -A 100 "TUNING_CONFIG"
+kubectl get rayjob <job-name> -n admin -o yaml | grep -A 100 "TRAINING_CONFIG"
 ```
 
 **Expected Output**:
 ```yaml
 runtimeEnvYAML: |
   env_vars:
-    TUNING_CONFIG: |
+    TRAINING_CONFIG: |
       {
         "num_worker": 1,
         "use_gpu": false,
@@ -218,7 +218,7 @@ runtimeEnvYAML: |
 kubectl get pods -n admin -l ray.io/cluster=<job-name>
 
 # Check environment variable
-kubectl exec -n admin <pod-name> -c ray-head -- env | grep TUNING_CONFIG
+kubectl exec -n admin <pod-name> -c ray-head -- env | grep TRAINING_CONFIG
 
 # Or check logs if container prints config
 kubectl logs -n admin <pod-name> -c ray-head
@@ -226,7 +226,7 @@ kubectl logs -n admin <pod-name> -c ray-head
 
 ### 4. Update Training Container
 
-**Your training container needs to be updated** to read from `TUNING_CONFIG` instead of individual environment variables.
+**Your training container needs to be updated** to read from `TRAINING_CONFIG` instead of individual environment variables.
 
 **Quick Migration**:
 ```python
@@ -234,10 +234,10 @@ kubectl logs -n admin <pod-name> -c ray-head
 import json, os
 
 def get_config():
-    """Read configuration from TUNING_CONFIG"""
-    config_str = os.environ.get('TUNING_CONFIG', '{}')
+    """Read configuration from TRAINING_CONFIG"""
+    config_str = os.environ.get('TRAINING_CONFIG', '{}')
     if not config_str or config_str == '{}':
-        raise ValueError("TUNING_CONFIG environment variable not set")
+        raise ValueError("TRAINING_CONFIG environment variable not set")
     return json.loads(config_str)
 
 # Use it
@@ -309,6 +309,6 @@ kubectl rollout status deployment/ml-platform-backend -n kubeflow
 ✅ **Backend v1.2 deployed and validated**
 ✅ **Tests confirm JSON config format works**
 ✅ **Ready for end-to-end testing**
-📝 **Container needs update to read TUNING_CONFIG**
+📝 **Container needs update to read TRAINING_CONFIG**
 
 **Next Action**: Test by submitting a job through the UI and verify the RayJob has the correct JSON configuration format.

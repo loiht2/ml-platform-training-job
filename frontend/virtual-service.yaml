@@ -13,20 +13,20 @@ spec:
     - '*'
   http:
     # Centraldashboard iframe URL: /_/training-job/
-    - headers:
-        request:
-          add:
-            x-forwarded-prefix: /training-job
-      match:
-        - uri:
-            prefix: /_/training-job/
-      rewrite:
-        uri: /
-      route:
-        - destination:
-            host: training-job-web-app-service.kubeflow.svc.cluster.local
-            port:
-              number: 80
+    # - headers:
+    #     request:
+    #       add:
+    #         x-forwarded-prefix: /training-job
+    #   match:
+    #     - uri:
+    #         prefix: /_/training-job/
+    #   rewrite:
+    #     uri: /
+    #   route:
+    #     - destination:
+    #         host: training-job-web-app-service.kubeflow.svc.cluster.local
+    #         port:
+    #           number: 80
     
     # Direct URL: /training-job/
     - headers:

@@ -45,7 +45,7 @@ spec:
       serviceAccountName: ml-platform-backend
       containers:
         - name: backend
-          image: loihoangthanh1411/ml-platform-backend:kubeflow-v1.5
+          image: loihoangthanh1411/ml-platform-backend:kubeflow-v2.0
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
@@ -134,7 +134,7 @@ spec:
       serviceAccountName: ml-platform-frontend
       containers:
         - name: frontend
-          image: loihoangthanh1411/ml-platform-frontend:kubeflow-v1.12
+          image: loihoangthanh1411/ml-platform-frontend:kubeflow-v2.0
           imagePullPolicy: Always
           ports:
             - containerPort: 8080

@@ -7,7 +7,7 @@
 
 ## Summary
 
-Updated the backend to pass the entire training configuration as a **single JSON object** in the `TUNING_CONFIG` environment variable, instead of converting each parameter to individual environment variables.
+Updated the backend to pass the entire training configuration as a **single JSON object** in the `TRAINING_CONFIG` environment variable, instead of converting each parameter to individual environment variables.
 
 ---
 
@@ -52,7 +52,7 @@ The backend creates a single JSON configuration:
 spec:
   runtimeEnvYAML: |
     env_vars:
-      TUNING_CONFIG: |
+      TRAINING_CONFIG: |
         {
           "num_worker": 2,
           "use_gpu": false,
@@ -149,8 +149,8 @@ Your training container should read the configuration like this:
 import json
 import os
 
-# Read TUNING_CONFIG environment variable
-config_str = os.environ.get('TUNING_CONFIG', '{}')
+# Read TRAINING_CONFIG environment variable
+config_str = os.environ.get('TRAINING_CONFIG', '{}')
 config = json.loads(config_str)
 
 # Access configuration values
@@ -205,7 +205,7 @@ type XGBoostConfig struct {
 }
 
 func main() {
-    configStr := os.Getenv("TUNING_CONFIG")
+    configStr := os.Getenv("TRAINING_CONFIG")
     
     var config Config
     if err := json.Unmarshal([]byte(configStr), &config); err != nil {
@@ -283,7 +283,7 @@ Both tests pass and show the generated output.
    ```yaml
    runtimeEnvYAML: |
      env_vars:
-       TUNING_CONFIG: |
+       TRAINING_CONFIG: |
          {
            "num_worker": 2,
            "xgboost": {
@@ -298,7 +298,7 @@ Both tests pass and show the generated output.
    kubectl get pods -n admin -l ray.io/cluster=test-json-config
    
    # Check environment variables
-   kubectl exec -n admin <pod-name> -c ray-head -- env | grep TUNING_CONFIG
+   kubectl exec -n admin <pod-name> -c ray-head -- env | grep TRAINING_CONFIG
    ```
 
 ---
@@ -328,7 +328,7 @@ kubectl get deployment ml-platform-backend -n kubeflow -o jsonpath='{.spec.templ
 
 ## Migration Guide
 
-If you have existing training containers that expect individual environment variables, you need to update them to read from `TUNING_CONFIG`.
+If you have existing training containers that expect individual environment variables, you need to update them to read from `TRAINING_CONFIG`.
 
 ### Quick Migration
 
@@ -339,8 +339,8 @@ import json
 import os
 
 def get_config():
-    """Read configuration from TUNING_CONFIG or fall back to individual env vars"""
-    config_str = os.environ.get('TUNING_CONFIG')
+    """Read configuration from TRAINING_CONFIG or fall back to individual env vars"""
+    config_str = os.environ.get('TRAINING_CONFIG')
     
     if config_str:
         # New format: JSON config
@@ -409,7 +409,7 @@ spec:
   entrypoint: python /home/ray/xgboost_train.py
   runtimeEnvYAML: |
     env_vars:
-      TUNING_CONFIG: |
+      TRAINING_CONFIG: |
         {
           "label_column": "target",
           "num_worker": 2,
@@ -454,11 +454,11 @@ spec:
 
 ## Troubleshooting
 
-### Issue: Container can't parse TUNING_CONFIG
+### Issue: Container can't parse TRAINING_CONFIG
 
 **Check**:
 ```bash
-kubectl get rayjob <job-name> -n <namespace> -o yaml | grep -A 100 "TUNING_CONFIG"
+kubectl get rayjob <job-name> -n <namespace> -o yaml | grep -A 100 "TRAINING_CONFIG"
 ```
 
 **Verify**:

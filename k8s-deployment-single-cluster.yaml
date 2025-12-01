@@ -1,16 +1,10 @@
 ---
-# Namespace for ML Platform
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ml-platform
----
 # ServiceAccount for backend to access Kubernetes API
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: ml-platform-backend
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
 ---
 # ClusterRole with permissions to manage training jobs across all namespaces
 apiVersion: rbac.authorization.k8s.io/v1
@@ -49,14 +43,14 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: ml-platform-backend
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
 ---
 # PostgreSQL Configuration
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: postgres-config
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
 data:
   POSTGRES_DB: training_jobs
   POSTGRES_USER: mlplatform
@@ -65,7 +59,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: postgres-secret
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
 type: Opaque
 stringData:
   POSTGRES_PASSWORD: mlplatform123
@@ -75,7 +69,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: postgres-pvc
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
 spec:
   accessModes:
     - ReadWriteOnce
@@ -89,7 +83,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: postgres
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
   labels:
     app: postgres
 spec:
@@ -168,7 +162,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: postgres
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
   labels:
     app: postgres
 spec:
@@ -186,7 +180,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: backend-config
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
 data:
   DATABASE_URL: "postgresql://mlplatform:mlplatform123@postgres:5432/training_jobs?sslmode=disable"
 ---
@@ -195,7 +189,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ml-platform-backend
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
   labels:
     app: ml-platform-backend
     version: single-cluster-v0.1
@@ -213,7 +207,7 @@ spec:
       serviceAccountName: ml-platform-backend  # Use ServiceAccount for RBAC
       containers:
       - name: backend
-        image: docker.io/loihoangthanh1411/ml-platform-backend:single-cluster-v0.1
+        image: docker.io/loihoangthanh1411/ml-platform-backend:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8080
@@ -258,7 +252,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: ml-platform-backend
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
   labels:
     app: ml-platform-backend
 spec:
@@ -277,7 +271,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ml-platform-frontend
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
   labels:
     app: ml-platform-frontend
     version: single-cluster-v0.2
@@ -294,7 +288,7 @@ spec:
     spec:
       containers:
       - name: frontend
-        image: docker.io/loihoangthanh1411/ml-platform-frontend:single-cluster-v0.2
+        image: docker.io/loihoangthanh1411/ml-platform-frontend:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8080
@@ -329,7 +323,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: ml-platform-frontend
-  namespace: ml-platform
+  namespace: kubeflow-user-example-com
   labels:
     app: ml-platform-frontend
 spec:

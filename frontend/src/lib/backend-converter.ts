@@ -3,12 +3,14 @@ import type { BackendTrainingJobRequest } from './api-service';
 
 /**
  * Converts frontend JobPayload to NEW backend API request format (v2)
+ * Updated to match new JSON format with input/output structure
  */
 export function convertToBackendRequest(
   payload: JobPayload,
   namespace?: string
 ): BackendTrainingJobRequest {
   const algorithmName = payload.algorithm.algorithmName || 'xgboost';
+  const currentNamespace = namespace || 'kubeflow-user-example-com';
   
   // Convert hyperparameters to the backend format
   const hyperparameters: any = {};
@@ -63,19 +65,55 @@ export function convertToBackendRequest(
     };
   }
   
-  // Build inputDataConfig
-  const inputDataConfig = (payload.inputDataConfig || []).map(channel => ({
-    id: channel.id || `channel-${Math.random().toString(36).substr(2, 9)}`,
-    channelName: channel.channelName || 'train',
-    sourceType: channel.sourceType || 'object-storage',
-    storageProvider: channel.storageProvider || 'minio',
-    endpoint: channel.endpoint || 'http://minio:9000',
-    bucket: channel.bucket || 'datasets',
-    prefix: channel.prefix || ''
-  }));
+  // Build input array (new format)
+  const input = (payload.inputDataConfig || []).map(channel => {
+    const baseInput: any = {
+      channelName: channel.channelName || 'train',
+      channelType: channel.channelType || 'train',
+      sourceType: channel.sourceType || 'object-storage',
+      storageProvider: channel.storageProvider || 'minio',
+      endpoint: channel.endpoint || 'http://minio.minio-system.svc.cluster.local:9000',
+      bucket: channel.bucket || currentNamespace,
+      path: channel.prefix || `training-data/${channel.channelType || 'train'}/${channel.uploadFileName || 'data'}`,
+    };
+    
+    // Add upload-specific fields if sourceType is upload
+    if (channel.sourceType === 'upload') {
+      if (channel.featureNames && channel.featureNames.length > 0) {
+        baseInput.featureNames = channel.featureNames;
+      }
+      if (channel.labelName) {
+        baseInput.labelName = channel.labelName;
+      }
+      if (channel.uploadFileName) {
+        baseInput.uploadFileName = channel.uploadFileName;
+      }
+    }
+    
+    return baseInput;
+  });
   
+  // Build output object (new format)
+  const output: any = {
+    storageProvider: payload.outputDataConfig?.storageProvider || 'minio',
+    bucket: payload.outputDataConfig?.bucket || currentNamespace,
+    path: payload.outputDataConfig?.prefix || `output/${payload.jobName}`,
+    endpoint: payload.outputDataConfig?.endpoint || 'http://minio.minio-system.svc.cluster.local:9000',
+  };
+  
+  // Build checkpoint object if enabled (new format)
+  let checkpoint: any = undefined;
+  if (payload.checkpointConfig?.enabled) {
+    checkpoint = {
+      storageProvider: payload.checkpointConfig.storageProvider || 'minio',
+      bucket: payload.checkpointConfig.bucket || currentNamespace,
+      path: payload.checkpointConfig.prefix || `checkpoint/${payload.jobName}`,
+      endpoint: payload.checkpointConfig.endpoint || 'http://minio.minio-system.svc.cluster.local:9000',
+    };
+  }
+
   // Build the NEW backend request format
-  return {
+  const request: any = {
     jobName: payload.jobName,
     priority: payload.priority || 100,
     algorithm: {
@@ -94,14 +132,19 @@ export function convertToBackendRequest(
     stoppingCondition: {
       maxRuntimeSeconds: payload.stoppingCondition?.maxRuntimeSeconds || 14400
     },
-    inputDataConfig,
-    outputDataConfig: {
-      artifactUri: payload.outputDataConfig?.artifactUri || 'storage://output/artifacts/'
-    },
+    input,
+    output,
     hyperparameters,
     customHyperparameters: payload.customHyperparameters || {},
-    namespace: namespace || 'kubeflow-user-example-com'
+    currentNamespace: currentNamespace
   };
+  
+  // Add checkpoint if enabled
+  if (checkpoint) {
+    request.checkpoint = checkpoint;
+  }
+  
+  return request;
 }
 
 

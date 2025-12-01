@@ -212,7 +212,7 @@ kubectl delete secret ml-platform-postgres-secret -n kubeflow
 ## Version History
 
 - **v1.0-v1.1**: Initial Kubeflow integration with namespace fixes
-- **v1.2**: JSON config format (TUNING_CONFIG)
+- **v1.2**: JSON config format (TRAINING_CONFIG)
 - **v1.3**: MinIO upload integration
 - **v1.4**: Database removal (stateless architecture) ✅ **Current**
 

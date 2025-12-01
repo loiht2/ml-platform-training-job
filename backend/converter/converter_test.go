@@ -90,9 +90,9 @@ func TestBuildRuntimeEnvYAML(t *testing.T) {
 	fmt.Println(yaml)
 	fmt.Println("================")
 	
-	// Verify it contains TUNING_CONFIG
-	if !containsString(yaml, "TUNING_CONFIG") {
-		t.Error("YAML should contain TUNING_CONFIG")
+	// Verify it contains TRAINING_CONFIG
+	if !containsString(yaml, "TRAINING_CONFIG") {
+		t.Error("YAML should contain TRAINING_CONFIG")
 	}
 	
 	// Verify it contains JSON structure

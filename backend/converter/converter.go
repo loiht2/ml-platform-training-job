@@ -98,7 +98,7 @@ func (c *Converter) ConvertToRayJobV2(req *models.TrainingJobRequest, jobID stri
 	return rayJob, nil
 }
 
-// buildRuntimeEnvYAML creates the runtime environment YAML with TUNING_CONFIG as JSON
+// buildRuntimeEnvYAML creates the runtime environment YAML with TRAINING_CONFIG as JSON
 func (c *Converter) buildRuntimeEnvYAML(req *models.TrainingJobRequest) string {
 	// Build the complete configuration as a map
 	config := c.buildTrainingConfig(req)
@@ -127,23 +127,39 @@ func (c *Converter) buildRuntimeEnvYAML(req *models.TrainingJobRequest) string {
 		jsonStr.WriteString("\n")
 	}
 	
-	// Build YAML with TUNING_CONFIG
-	return fmt.Sprintf("env_vars:\n  TUNING_CONFIG: %s", jsonStr.String())
+	// Build YAML with TRAINING_CONFIG
+	return fmt.Sprintf("env_vars:\n  TRAINING_CONFIG: %s", jsonStr.String())
 }
 
 // buildTrainingConfig creates the complete training configuration map
 func (c *Converter) buildTrainingConfig(req *models.TrainingJobRequest) map[string]interface{} {
 	config := make(map[string]interface{})
 	
-	// Training control
-	config["num_worker"] = req.Resources.InstanceCount
-	config["use_gpu"] = req.Resources.InstanceResources.GPUCount > 0
-	config["label_column"] = DefaultLabelColumn
-	config["run_name"] = req.JobName
-	config["storage_path"] = c.deriveStoragePath(req.OutputDataConfig.ArtifactURI)
-	
-	// S3/MinIO configuration
-	if len(req.InputDataConfig) > 0 {
+	// Use new format if available, otherwise fallback to old format
+	if len(req.Input) > 0 {
+		// New format - pass input/output/checkpoint directly
+		config["input"] = req.Input
+		
+		if req.Output != nil {
+			config["output"] = req.Output
+		}
+		
+		if req.Checkpoint != nil {
+			config["checkpoint"] = req.Checkpoint
+		}
+		
+		if req.CurrentNamespace != "" {
+			config["currentNamespace"] = req.CurrentNamespace
+		}
+	} else if len(req.InputDataConfig) > 0 {
+		// Old format - convert for backward compatibility
+		config["num_worker"] = req.Resources.InstanceCount
+		config["use_gpu"] = req.Resources.InstanceResources.GPUCount > 0
+		config["label_column"] = DefaultLabelColumn
+		config["run_name"] = req.JobName
+		config["storage_path"] = c.deriveStoragePath(req.OutputDataConfig.ArtifactURI)
+		
+		// S3/MinIO configuration
 		inputConfig := req.InputDataConfig[0]
 		s3Config := map[string]interface{}{
 			"endpoint":   inputConfig.Endpoint,

@@ -100,7 +100,7 @@ if echo "$RESPONSE" | grep -q "error"; then
   echo "   3. Click 'Create Training Job'"
   echo "   4. Fill in the form and submit"
   echo "   5. Run this command to check the job:"
-  echo "      kubectl get rayjob <job-name> -n admin -o yaml | grep -A 100 'TUNING_CONFIG'"
+  echo "      kubectl get rayjob <job-name> -n admin -o yaml | grep -A 100 'TRAINING_CONFIG'"
   exit 1
 fi
 
@@ -118,13 +118,13 @@ if kubectl get rayjob "$JOB_NAME_FROM_RESPONSE" -n "$NAMESPACE" &>/dev/null; the
   echo "✅ RayJob created successfully: $JOB_NAME_FROM_RESPONSE"
   echo ""
   
-  echo "Step 4: Extracting TUNING_CONFIG..."
+  echo "Step 4: Extracting TRAINING_CONFIG..."
   echo ""
   
-  CONFIG=$(kubectl get rayjob "$JOB_NAME_FROM_RESPONSE" -n "$NAMESPACE" -o yaml | grep -A 100 "TUNING_CONFIG" | head -80)
+  CONFIG=$(kubectl get rayjob "$JOB_NAME_FROM_RESPONSE" -n "$NAMESPACE" -o yaml | grep -A 100 "TRAINING_CONFIG" | head -80)
   
-  if echo "$CONFIG" | grep -q "TUNING_CONFIG"; then
-    echo "✅ TUNING_CONFIG found in RayJob!"
+  if echo "$CONFIG" | grep -q "TRAINING_CONFIG"; then
+    echo "✅ TRAINING_CONFIG found in RayJob!"
     echo ""
     echo "Configuration:"
     echo "----------------------------------------"
@@ -133,7 +133,7 @@ if kubectl get rayjob "$JOB_NAME_FROM_RESPONSE" -n "$NAMESPACE" &>/dev/null; the
     echo ""
     
     # Validate JSON structure
-    JSON_CONFIG=$(echo "$CONFIG" | sed -n '/TUNING_CONFIG: |/,/^[^ ]/p' | grep -v "TUNING_CONFIG" | grep -v "^[^ ]" | sed 's/^        //')
+    JSON_CONFIG=$(echo "$CONFIG" | sed -n '/TRAINING_CONFIG: |/,/^[^ ]/p' | grep -v "TRAINING_CONFIG" | grep -v "^[^ ]" | sed 's/^        //')
     
     if echo "$JSON_CONFIG" | jq '.' &>/dev/null; then
       echo "✅ JSON configuration is valid!"
@@ -146,7 +146,7 @@ if kubectl get rayjob "$JOB_NAME_FROM_RESPONSE" -n "$NAMESPACE" &>/dev/null; the
       echo "=========================================="
       echo ""
       echo "Key verification:"
-      echo "  - TUNING_CONFIG env var present: ✅"
+      echo "  - TRAINING_CONFIG env var present: ✅"
       echo "  - Valid JSON structure: ✅"
       echo "  - Contains num_worker: $(echo "$JSON_CONFIG" | jq -r '.num_worker')"
       echo "  - Contains s3 config: $(echo "$JSON_CONFIG" | jq -r '.s3.endpoint' | head -c 30)..."
@@ -158,7 +158,7 @@ if kubectl get rayjob "$JOB_NAME_FROM_RESPONSE" -n "$NAMESPACE" &>/dev/null; the
     fi
     
   else
-    echo "❌ TUNING_CONFIG not found!"
+    echo "❌ TRAINING_CONFIG not found!"
     echo ""
     echo "RayJob runtimeEnvYAML:"
     kubectl get rayjob "$JOB_NAME_FROM_RESPONSE" -n "$NAMESPACE" -o yaml | grep -A 50 "runtimeEnvYAML"

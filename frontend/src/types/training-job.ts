@@ -45,6 +45,15 @@ export type OutputDataConfig = {
   endpoint?: string;
 };
 
+export type CheckpointConfig = {
+  enabled: boolean;
+  configMode?: "default" | "custom";
+  storageProvider?: StorageProvider;
+  bucket?: string;
+  prefix?: string;
+  endpoint?: string;
+};
+
 export type TrainingJobForm = {
   jobName: string;
   priority: number;
@@ -57,6 +66,7 @@ export type TrainingJobForm = {
   stoppingCondition: { maxRuntimeSeconds: number };
   inputDataConfig: Channel[];
   outputDataConfig: OutputDataConfig;
+  checkpointConfig?: CheckpointConfig;
   hyperparameters: Record<string, HyperparameterValues>;
   customHyperparameters?: CustomHyperparameters;
 };
@@ -73,6 +83,7 @@ export type JobPayload = {
   stoppingCondition: { maxRuntimeSeconds: number };
   inputDataConfig: Channel[];
   outputDataConfig: OutputDataConfig;
+  checkpointConfig?: CheckpointConfig;
   hyperparameters: Record<string, HyperparameterValues>;
   customHyperparameters?: CustomHyperparameters;
 };

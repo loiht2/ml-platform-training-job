@@ -68,6 +68,17 @@ export interface JobStatus {
   clusterDistribution?: Record<string, number>;
 }
 
+export interface ClusterInfo {
+  name: string;
+  ready: boolean;
+  region?: string;
+  zone?: string;
+}
+
+export interface ClustersListResponse {
+  clusters: ClusterInfo[];
+}
+
 class APIError extends Error {
   constructor(
     message: string,
@@ -181,6 +192,15 @@ export const healthApi = {
    */
   check: async (): Promise<{ status: string }> => {
     return fetchAPI<{ status: string }>('/health', {}, );
+  },
+};
+
+export const clustersApi = {
+  /**
+   * List all available clusters
+   */
+  list: async (): Promise<ClustersListResponse> => {
+    return fetchAPI<ClustersListResponse>('/clusters');
   },
 };
 

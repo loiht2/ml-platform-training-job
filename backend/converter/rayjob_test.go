@@ -122,22 +122,22 @@ func TestConvertToRayJobV2WithJSONConfig(t *testing.T) {
 	fmt.Println(runtimeEnvYAML)
 	fmt.Println("==============================================")
 	
-	// Verify TUNING_CONFIG is present
-	if !containsString(runtimeEnvYAML, "TUNING_CONFIG") {
-		t.Error("runtimeEnvYAML should contain TUNING_CONFIG")
+	// Verify TRAINING_CONFIG is present
+	if !containsString(runtimeEnvYAML, "TRAINING_CONFIG") {
+		t.Error("runtimeEnvYAML should contain TRAINING_CONFIG")
 	}
 	
 	// Verify it's JSON format
 	if !containsString(runtimeEnvYAML, `"num_worker"`) {
-		t.Error("TUNING_CONFIG should contain JSON fields like num_worker")
+		t.Error("TRAINING_CONFIG should contain JSON fields like num_worker")
 	}
 	
 	if !containsString(runtimeEnvYAML, `"xgboost"`) {
-		t.Error("TUNING_CONFIG should contain xgboost configuration")
+		t.Error("TRAINING_CONFIG should contain xgboost configuration")
 	}
 	
 	if !containsString(runtimeEnvYAML, `"s3"`) {
-		t.Error("TUNING_CONFIG should contain s3 configuration")
+		t.Error("TRAINING_CONFIG should contain s3 configuration")
 	}
 	
 	// Test that the config is valid JSON by parsing it
@@ -170,6 +170,6 @@ func TestConvertToRayJobV2WithJSONConfig(t *testing.T) {
 	}
 	
 	fmt.Println("\n✅ All tests passed!")
-	fmt.Println("✅ JSON config is properly formatted in TUNING_CONFIG environment variable")
+	fmt.Println("✅ JSON config is properly formatted in TRAINING_CONFIG environment variable")
 	fmt.Println("✅ Container will receive the complete configuration as a single JSON string")
 }
